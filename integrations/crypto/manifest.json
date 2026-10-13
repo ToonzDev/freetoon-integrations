@@ -1,0 +1,19 @@
+{
+  "id": "crypto",
+  "name": "Crypto Tracker",
+  "version": "1.0.0",
+  "binary": "crypto",
+  "args": [],
+  "service_id": "cryptoTicker",
+  "tile": {
+    "title": "Crypto",
+    "color": "0xf2a900",
+    "icon": "coin",
+    "value_field": "price",
+    "value_unit": "",
+    "subtitle_field": "change24h",
+    "subtitle_unit": ""
+  },
+  "description": "Live crypto koersen en 24h verandering via CoinGecko API.",
+  "license": "MIT"
+}

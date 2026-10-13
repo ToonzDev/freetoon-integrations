@@ -1,0 +1,32 @@
+#!/bin/sh
+# crypto daemon for FreeToon
+CONF_FILE="/mnt/data/integrations/crypto/crypto.conf"
+HIST_DIR="/mnt/data/integrations/crypto/hist"
+mkdir -p "$HIST_DIR"
+
+if [ ! -f "$CONF_FILE" ]; then
+    cat > "$CONF_FILE" <<'EOF'
+VS=eur
+COIN=bitcoin,BTC,50000,below,off
+COIN=ethereum,ETH,3000,below,off
+EOF
+fi
+
+trap "exit 0" TERM INT
+
+while true; do
+    VS=$(grep "^VS=" "$CONF_FILE" 2>/dev/null | cut -d= -f2)
+    [ -n "$VS" ] || VS="eur"
+    COINS=$(grep "^COIN=" "$CONF_FILE" 2>/dev/null | cut -d= -f2 | cut -d, -f1 | tr '\n' ',' | sed 's/,$//')
+    if [ -n "$COINS" ]; then
+        RES=$(curl -s --max-time 10 "https://api.coingecko.com/api/v3/simple/price?ids=$COINS&vs_currencies=$VS&include_24hr_change=true" 2>/dev/null || true)
+        FIRST_ID=$(echo "$COINS" | cut -d, -f1)
+        PRICE=$(echo "$RES" | grep -o "\"$FIRST_ID\":{[^}]*}" | grep -o "\"$VS\":[0-9.]*" | cut -d: -f2)
+        if [ -n "$PRICE" ]; then
+            NOW=$(date +%s)
+            echo "$NOW	$PRICE" >> "$HIST_DIR/${FIRST_ID}_1.tsv"
+            tail -n 240 "$HIST_DIR/${FIRST_ID}_1.tsv" > "$HIST_DIR/${FIRST_ID}_1.tsv.tmp" 2>/dev/null && mv -f "$HIST_DIR/${FIRST_ID}_1.tsv.tmp" "$HIST_DIR/${FIRST_ID}_1.tsv"
+        fi
+    fi
+    sleep 120
+done

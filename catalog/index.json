@@ -1,0 +1,18 @@
+{
+  "integrations": [
+    {
+      "id": "temperaturelogger",
+      "name": "Temperature Logger",
+      "version": "1.0.0",
+      "description": "24-uurs temperatuurlogger met grafiek (kamer, setpoint, buiten).",
+      "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/temperaturelogger.tgz"
+    },
+    {
+      "id": "crypto",
+      "name": "Crypto Tracker",
+      "version": "1.0.0",
+      "description": "Live crypto koersen en 24h verandering via CoinGecko API.",
+      "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/crypto.tgz"
+    }
+  ]
+}

@@ -1,0 +1,3 @@
+VS=eur
+COIN=bitcoin,BTC,50000,below,off
+COIN=ethereum,ETH,3000,below,off
