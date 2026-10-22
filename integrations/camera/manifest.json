@@ -1,0 +1,23 @@
+{
+  "id": "camera",
+  "name": "Deurbel & Camera",
+  "version": "1.0.0",
+  "binary": "freetoon-app-camera",
+  "args": [],
+  "service_id": "doorbellCamera",
+  "tile": {
+    "title": "Camera",
+    "color": "0x334455",
+    "icon": "camera",
+    "value_field": "status",
+    "value_unit": "",
+    "subtitle_field": "last_event",
+    "subtitle_unit": ""
+  },
+  "detail_screen": {
+    "type": "custom_screen",
+    "handler": "screen_doorbell"
+  },
+  "description": "Deurbel- en camerameldingen via webhook op poort 8765 en live video overlay.",
+  "license": "MIT"
+}

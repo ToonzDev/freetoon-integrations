@@ -41,6 +41,20 @@
       "version": "1.0.0",
       "description": "Synchroniseert afspraken uit Home Assistant en iCal/Google Calendar.",
       "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/agenda.tgz"
+    },
+    {
+      "id": "ventilation",
+      "name": "Itho Ventilatie",
+      "version": "1.0.0",
+      "description": "Itho CVE-S ventilatieregeling via MQTT en virtuele afstandsbediening.",
+      "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/ventilation.tgz"
+    },
+    {
+      "id": "camera",
+      "name": "Deurbel & Camera",
+      "version": "1.0.0",
+      "description": "Deurbel- en camerameldingen via webhook op poort 8765 en live video overlay.",
+      "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/camera.tgz"
     }
   ]
 }
