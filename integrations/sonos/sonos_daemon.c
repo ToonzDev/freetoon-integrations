@@ -525,6 +525,11 @@ int main(int argc, char ** argv) {
         }
 
         if (g_speaker_ip[0]) {
+            FILE * fip = fopen("/mnt/data/integrations/sonos/speaker.ip", "w");
+            if (fip) {
+                fputs(g_speaker_ip, fip);
+                fclose(fip);
+            }
             poll_sonos();
         } else {
             post_to_freetoon("Sonos", "Zoeken...", 0, -1);

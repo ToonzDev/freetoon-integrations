@@ -1,7 +1,7 @@
 {
   "id": "sonos",
   "name": "Sonos Player",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "binary": "freetoon-app-sonos",
   "args": [],
   "service_id": "sonosPlayer",
@@ -16,10 +16,10 @@
     "subtitle_unit": ""
   },
   "detail_screen": {
-    "type": "custom_screen",
-    "handler": "screen_sonos"
+    "type": "plugin",
+    "library": "sonos_ui.so",
+    "entry": "screen_create"
   },
   "description": "Native Sonos UPnP / SOAP controller met favorieten, radio en volume.",
   "license": "MIT"
 }
-
