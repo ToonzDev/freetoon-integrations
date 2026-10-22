@@ -13,6 +13,14 @@
       "version": "1.0.0",
       "description": "Live crypto koersen en 24h verandering via CoinGecko API.",
       "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/crypto.tgz"
+    },
+    {
+      "id": "sonos",
+      "name": "Sonos Player",
+      "version": "1.0.0",
+      "description": "Native Sonos UPnP / SOAP controller met favorieten, radio en volume.",
+      "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/sonos.tgz"
     }
   ]
 }
+
