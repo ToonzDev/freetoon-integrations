@@ -20,6 +20,13 @@
       "version": "1.0.0",
       "description": "Native Sonos UPnP / SOAP controller met favorieten, radio en volume.",
       "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/sonos.tgz"
+    },
+    {
+      "id": "domoticz",
+      "name": "Domoticz Home Automation",
+      "version": "1.0.0",
+      "description": "Schakelaars, dimmers en zonwering via Domoticz HTTP JSON API.",
+      "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/domoticz.tgz"
     }
   ]
 }

@@ -1,0 +1,23 @@
+{
+  "id": "domoticz",
+  "name": "Domoticz Home Automation",
+  "version": "1.0.0",
+  "binary": "freetoon-app-domoticz",
+  "args": [],
+  "service_id": "domoticzBridge",
+  "tile": {
+    "title": "Domoticz",
+    "color": "0x2a4060",
+    "icon": "bulb",
+    "value_field": "device_count",
+    "value_unit": "apparaten",
+    "subtitle_field": "active_devices",
+    "subtitle_unit": ""
+  },
+  "detail_screen": {
+    "type": "custom_screen",
+    "handler": "screen_domoticz"
+  },
+  "description": "Schakelaars, dimmers en zonwering via Domoticz HTTP JSON API.",
+  "license": "MIT"
+}
