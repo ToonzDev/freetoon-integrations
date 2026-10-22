@@ -27,3 +27,4 @@ $(OUT): agenda_daemon.c
 
 clean:
 	rm -f freetoon-app-agenda freetoon-app-agenda-toon1
+

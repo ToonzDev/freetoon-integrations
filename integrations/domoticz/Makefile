@@ -27,3 +27,4 @@ $(OUT): domoticz_daemon.c
 
 clean:
 	rm -f freetoon-app-domoticz freetoon-app-domoticz-toon1
+

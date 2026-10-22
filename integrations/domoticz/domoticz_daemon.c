@@ -119,3 +119,4 @@ int main(int argc, char ** argv) {
     fprintf(stderr, "[domoticz_daemon] exiting.\n");
     return 0;
 }
+

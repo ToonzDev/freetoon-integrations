@@ -17,3 +17,4 @@ for d in "$INTEGRATIONS_DIR"/*; do
 done
 
 echo "Done packaging integrations."
+

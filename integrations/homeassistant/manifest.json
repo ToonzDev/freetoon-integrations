@@ -21,3 +21,4 @@
   "description": "Verbindt FreeToon met Home Assistant via REST & WebSocket (gordijnen, verlichting, sensoren).",
   "license": "MIT"
 }
+

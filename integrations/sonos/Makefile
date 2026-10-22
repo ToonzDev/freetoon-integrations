@@ -27,3 +27,4 @@ $(OUT): sonos_daemon.c
 
 clean:
 	rm -f freetoon-app-sonos freetoon-app-sonos-toon1
+

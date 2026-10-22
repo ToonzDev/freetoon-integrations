@@ -27,3 +27,4 @@ $(OUT): ha_daemon.c
 
 clean:
 	rm -f freetoon-app-ha freetoon-app-ha-toon1
+

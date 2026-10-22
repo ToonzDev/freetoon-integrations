@@ -32,3 +32,4 @@ freetoon-integrations/
 3. Run `./scripts/package.sh` to produce `packages/<id>.tgz`.
 4. Add the entry to `catalog/index.json`.
 5. Submit a pull request.
+

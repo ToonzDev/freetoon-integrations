@@ -178,3 +178,4 @@ int main(int argc, char ** argv) {
     fprintf(stderr, "[sonos_daemon] exiting.\n");
     return 0;
 }
+

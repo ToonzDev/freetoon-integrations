@@ -113,3 +113,4 @@ int main(int argc, char ** argv) {
     fprintf(stderr, "[agenda_daemon] exiting.\n");
     return 0;
 }
+
