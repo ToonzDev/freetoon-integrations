@@ -27,6 +27,13 @@
       "version": "1.0.0",
       "description": "Schakelaars, dimmers en zonwering via Domoticz HTTP JSON API.",
       "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/domoticz.tgz"
+    },
+    {
+      "id": "homeassistant",
+      "name": "Home Assistant",
+      "version": "1.0.0",
+      "description": "Verbindt FreeToon met Home Assistant via REST & WebSocket (gordijnen, verlichting, sensoren).",
+      "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/homeassistant.tgz"
     }
   ]
 }

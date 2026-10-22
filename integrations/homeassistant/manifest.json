@@ -1,0 +1,23 @@
+{
+  "id": "homeassistant",
+  "name": "Home Assistant",
+  "version": "1.0.0",
+  "binary": "freetoon-app-ha",
+  "args": [],
+  "service_id": "haBridge",
+  "tile": {
+    "title": "Home Assistant",
+    "color": "0x03a9f4",
+    "icon": "home",
+    "value_field": "status",
+    "value_unit": "",
+    "subtitle_field": "summary",
+    "subtitle_unit": ""
+  },
+  "detail_screen": {
+    "type": "custom_screen",
+    "handler": "screen_ha_devices"
+  },
+  "description": "Verbindt FreeToon met Home Assistant via REST & WebSocket (gordijnen, verlichting, sensoren).",
+  "license": "MIT"
+}
