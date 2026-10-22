@@ -22,7 +22,6 @@
 #include <fcntl.h>
 #include <errno.h>
 
-#define TOON_API_URL "http://127.0.0.1:10081/api/v1/marketplace/apps/sonos/state"
 #define CFG_PATH     "/mnt/data/toonui.cfg"
 #define STATE_PATH   "/mnt/data/integrations/sonos/state.json"
 
@@ -30,7 +29,7 @@ static volatile int g_running = 1;
 static char g_speaker_ip[64] = "";
 static char g_last_title[128] = "";
 static char g_last_artist[128] = "";
-static int  g_last_playing = -1;
+static int  g_last_playing = 0;
 static int  g_last_volume = -1;
 
 static void on_signal(int sig) {
@@ -61,6 +60,188 @@ static void read_cfg_ip(void) {
         }
     }
     fclose(f);
+}
+
+/* XML unescaping */
+static void xml_unescape_in_place(char * s) {
+    if (!s) return;
+    for (int pass = 0; pass < 3; pass++) {
+        char * r = s;
+        char * w = s;
+        int changed = 0;
+        while (*r) {
+            if (*r == '&') {
+                if (strncmp(r, "&amp;", 5) == 0) {
+                    *w++ = '&'; r += 5; changed = 1;
+                } else if (strncmp(r, "&quot;", 6) == 0) {
+                    *w++ = '"'; r += 6; changed = 1;
+                } else if (strncmp(r, "&apos;", 6) == 0) {
+                    *w++ = '\''; r += 6; changed = 1;
+                } else if (strncmp(r, "&#39;", 5) == 0) {
+                    *w++ = '\''; r += 5; changed = 1;
+                } else if (strncmp(r, "&#34;", 5) == 0) {
+                    *w++ = '"'; r += 5; changed = 1;
+                } else if (strncmp(r, "&lt;", 4) == 0) {
+                    *w++ = '<'; r += 4; changed = 1;
+                } else if (strncmp(r, "&gt;", 4) == 0) {
+                    *w++ = '>'; r += 4; changed = 1;
+                } else if (strncmp(r, "&nbsp;", 6) == 0) {
+                    *w++ = ' '; r += 6; changed = 1;
+                } else {
+                    *w++ = *r++;
+                }
+            } else {
+                *w++ = *r++;
+            }
+        }
+        *w = '\0';
+        if (!changed) break;
+    }
+}
+
+/* Extracts contents of <tag>...</tag> or &lt;tag...&gt;...&lt;/tag&gt; */
+static int extract_xml_tag(const char * xml, const char * tag, char * out, size_t outsz) {
+    if (!xml || !tag || !out || outsz == 0) return 0;
+    out[0] = 0;
+
+    char open1[64], open2[64];
+    snprintf(open1, sizeof open1, "<%s", tag);
+    snprintf(open2, sizeof open2, "&lt;%s", tag);
+    size_t tlen = strlen(tag);
+
+    const char * cur = xml;
+    const char * p = NULL;
+    int is_esc = 0;
+
+    while (*cur) {
+        const char * p1 = strstr(cur, open1);
+        const char * p2 = strstr(cur, open2);
+        if (!p1 && !p2) return 0;
+
+        if (p1 && (!p2 || p1 < p2)) {
+            char next = p1[1 + tlen];
+            if (next == '>' || next == ' ' || next == '/' || next == '\t' || next == '\r' || next == '\n') {
+                p = p1;
+                is_esc = 0;
+                break;
+            }
+            cur = p1 + 1;
+        } else {
+            const char * after = p2 + 4 + tlen;
+            if (*after == ' ' || *after == '/' || *after == '\t' || *after == '\r' || *after == '\n' ||
+                strncmp(after, "&gt;", 4) == 0) {
+                p = p2;
+                is_esc = 1;
+                break;
+            }
+            cur = p2 + 1;
+        }
+    }
+    if (!p) return 0;
+
+    if (is_esc) {
+        p = strstr(p, "&gt;");
+        if (!p) return 0;
+        p += 4;
+    } else {
+        p = strchr(p, '>');
+        if (!p) return 0;
+        p++;
+    }
+
+    char close1[64], close2[64];
+    snprintf(close1, sizeof close1, "</%s>", tag);
+    snprintf(close2, sizeof close2, "&lt;/%s&gt;", tag);
+
+    const char * end = is_esc ? strstr(p, close2) : strstr(p, close1);
+    if (!end) end = is_esc ? strstr(p, close1) : strstr(p, close2);
+    if (!end) return 0;
+
+    size_t o = 0;
+    while (p < end && o + 1 < outsz) {
+        out[o++] = *p++;
+    }
+    out[o] = 0;
+
+    xml_unescape_in_place(out);
+    return (o > 0);
+}
+
+static int sonos_soap(const char * ip, const char * control_path,
+                      const char * service, const char * action,
+                      const char * body_args,
+                      char * out_buf, size_t out_sz, int timeout_s) {
+    if (!ip || !ip[0] || !control_path || !service || !action) return -1;
+    if (out_buf && out_sz > 0) out_buf[0] = 0;
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+
+    struct timeval tv;
+    tv.tv_sec = timeout_s > 0 ? timeout_s : 2;
+    tv.tv_usec = 0;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    struct sockaddr_in sin;
+    memset(&sin, 0, sizeof(sin));
+    sin.sin_family = AF_INET;
+    sin.sin_port = htons(1400);
+    sin.sin_addr.s_addr = inet_addr(ip);
+
+    if (connect(fd, (struct sockaddr *)&sin, sizeof(sin)) != 0) {
+        close(fd);
+        return -1;
+    }
+
+    char body[4096];
+    int blen = snprintf(body, sizeof(body),
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
+        "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">"
+        "<s:Body>"
+        "<u:%s xmlns:u=\"%s\">"
+        "%s"
+        "</u:%s>"
+        "</s:Body>"
+        "</s:Envelope>",
+        action, service, body_args ? body_args : "", action);
+
+    char header[512];
+    int hlen = snprintf(header, sizeof(header),
+        "POST %s HTTP/1.1\r\n"
+        "Host: %s:1400\r\n"
+        "Content-Type: text/xml; charset=\"utf-8\"\r\n"
+        "Content-Length: %d\r\n"
+        "SOAPACTION: \"%s#%s\"\r\n"
+        "Connection: close\r\n\r\n",
+        control_path, ip, blen, service, action);
+
+    if (send(fd, header, hlen, 0) != hlen || send(fd, body, blen, 0) != blen) {
+        close(fd);
+        return -1;
+    }
+
+    char scratch[1024];
+    char * target = (out_buf && out_sz > 0) ? out_buf : scratch;
+    size_t target_sz = (out_buf && out_sz > 0) ? out_sz : sizeof(scratch);
+
+    size_t total = 0;
+    int got_200 = 0;
+    while (1) {
+        size_t cap = (total + 1 < target_sz) ? (target_sz - 1 - total) : (sizeof(scratch) - 1);
+        char * dest = (total + 1 < target_sz) ? (target + total) : scratch;
+        ssize_t r = recv(fd, dest, cap, 0);
+        if (r <= 0) break;
+        if (total + 1 < target_sz) {
+            total += r;
+            target[total] = 0;
+        }
+        if (!got_200 && (strstr(target, "200 OK") != NULL)) {
+            got_200 = 1;
+        }
+    }
+    close(fd);
+    return got_200 ? 0 : -2;
 }
 
 static int post_to_freetoon(const char * title, const char * artist, int playing, int volume) {
@@ -100,7 +281,7 @@ static int post_to_freetoon(const char * title, const char * artist, int playing
     send(s, req, rn, 0);
     close(s);
 
-    /* Also persist locally for offline tile reads */
+    /* Also persist locally */
     FILE * f = fopen(STATE_PATH, "w");
     if (f) {
         fprintf(f, "%s\n", body);
@@ -262,6 +443,68 @@ static int discover_sonos_ssdp(char * out_ip, size_t maxlen) {
     return -1;
 }
 
+static void poll_sonos(void) {
+    if (!g_speaker_ip[0]) return;
+
+    static char buf[16384];
+
+    /* 1. GetTransportInfo */
+    int rc = sonos_soap(g_speaker_ip, "/MediaRenderer/AVTransport/Control",
+                        "urn:schemas-upnp-org:service:AVTransport:1",
+                        "GetTransportInfo", "<InstanceID>0</InstanceID>",
+                        buf, sizeof(buf), 2);
+    if (rc == 0) {
+        char state[32] = "";
+        extract_xml_tag(buf, "CurrentTransportState", state, sizeof(state));
+        g_last_playing = (strcmp(state, "PLAYING") == 0);
+    } else {
+        /* Speaker unreachable, forget IP after failure */
+        g_speaker_ip[0] = 0;
+        return;
+    }
+
+    /* 2. GetPositionInfo */
+    rc = sonos_soap(g_speaker_ip, "/MediaRenderer/AVTransport/Control",
+                    "urn:schemas-upnp-org:service:AVTransport:1",
+                    "GetPositionInfo", "<InstanceID>0</InstanceID>",
+                    buf, sizeof(buf), 2);
+    if (rc == 0) {
+        char title[96] = "", artist[64] = "", stream[96] = "";
+        extract_xml_tag(buf, "dc:title", title, sizeof(title));
+        extract_xml_tag(buf, "dc:creator", artist, sizeof(artist));
+        if (!artist[0]) extract_xml_tag(buf, "upnp:artist", artist, sizeof(artist));
+        extract_xml_tag(buf, "r:streamContent", stream, sizeof(stream));
+
+        if (stream[0]) {
+            char * sep = strstr(stream, " - ");
+            if (sep) {
+                *sep = 0;
+                snprintf(g_last_artist, sizeof(g_last_artist), "%s", stream);
+                snprintf(g_last_title, sizeof(g_last_title), "%s", sep + 3);
+            } else {
+                snprintf(g_last_title, sizeof(g_last_title), "%s", stream);
+                snprintf(g_last_artist, sizeof(g_last_artist), "%s", artist[0] ? artist : title);
+            }
+        } else {
+            snprintf(g_last_title, sizeof(g_last_title), "%s", title[0] ? title : "Sonos");
+            snprintf(g_last_artist, sizeof(g_last_artist), "%s", artist);
+        }
+    }
+
+    /* 3. GetVolume */
+    rc = sonos_soap(g_speaker_ip, "/MediaRenderer/RenderingControl/Control",
+                    "urn:schemas-upnp-org:service:RenderingControl:1",
+                    "GetVolume", "<InstanceID>0</InstanceID><Channel>Master</Channel>",
+                    buf, sizeof(buf), 2);
+    if (rc == 0) {
+        char vol[16] = "";
+        extract_xml_tag(buf, "CurrentVolume", vol, sizeof(vol));
+        if (vol[0]) g_last_volume = atoi(vol);
+    }
+
+    post_to_freetoon(g_last_title, g_last_artist, g_last_playing, g_last_volume);
+}
+
 int main(int argc, char ** argv) {
     (void)argc; (void)argv;
     signal(SIGTERM, on_signal);
@@ -282,7 +525,9 @@ int main(int argc, char ** argv) {
         }
 
         if (g_speaker_ip[0]) {
-            post_to_freetoon(g_last_title, g_last_artist, g_last_playing, g_last_volume);
+            poll_sonos();
+        } else {
+            post_to_freetoon("Sonos", "Zoeken...", 0, -1);
         }
 
         sleep(3);
