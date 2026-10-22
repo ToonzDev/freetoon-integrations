@@ -68,7 +68,7 @@ static int post_to_freetoon(const char * status, const char * summary) {
     if (s < 0) return -1;
     struct sockaddr_in a = {0};
     a.sin_family = AF_INET;
-    a.sin_port = htons(10080);
+    a.sin_port = htons(10081);
     a.sin_addr.s_addr = htonl(0x7f000001);
     
     struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
@@ -89,7 +89,7 @@ static int post_to_freetoon(const char * status, const char * summary) {
     char req[1024];
     int rn = snprintf(req, sizeof(req),
         "POST /api/v1/marketplace/apps/homeassistant/state HTTP/1.0\r\n"
-        "Host: 127.0.0.1:10080\r\n"
+        "Host: 127.0.0.1:10081\r\n"
         "Content-Type: application/json\r\n"
         "Content-Length: %d\r\n"
         "Connection: close\r\n\r\n%s",
