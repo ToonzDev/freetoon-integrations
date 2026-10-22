@@ -6,6 +6,7 @@
   "args": [],
   "service_id": "sonosPlayer",
   "tile": {
+    "type": "media_player",
     "title": "Sonos",
     "color": "0x111111",
     "icon": "music",

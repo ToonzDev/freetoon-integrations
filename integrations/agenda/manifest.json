@@ -6,6 +6,7 @@
   "args": [],
   "service_id": "agendaCalendar",
   "tile": {
+    "type": "agenda_list",
     "title": "Agenda",
     "color": "0x4a6a8a",
     "icon": "calendar",
