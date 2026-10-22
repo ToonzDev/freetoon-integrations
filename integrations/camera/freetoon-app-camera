@@ -1,0 +1,11 @@
+#!/bin/sh
+DIR="$(dirname "$0")"
+ARCH="$(uname -m)"
+case "$ARCH" in
+    armv5*)
+        exec "$DIR/freetoon-app-camera.toon1" "$@"
+        ;;
+    *)
+        exec "$DIR/freetoon-app-camera.toon2" "$@"
+        ;;
+esac

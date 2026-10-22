@@ -27,3 +27,4 @@ $(OUT): camera_daemon.c
 
 clean:
 	rm -f freetoon-app-camera freetoon-app-camera-toon1
+

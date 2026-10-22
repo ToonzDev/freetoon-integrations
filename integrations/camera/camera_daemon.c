@@ -152,3 +152,4 @@ int main(int argc, char ** argv) {
     fprintf(stderr, "[camera_daemon] exiting.\n");
     return 0;
 }
+

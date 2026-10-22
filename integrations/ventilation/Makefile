@@ -27,3 +27,4 @@ $(OUT): vent_daemon.c
 
 clean:
 	rm -f freetoon-app-vent freetoon-app-vent-toon1
+
