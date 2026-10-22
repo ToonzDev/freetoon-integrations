@@ -15,6 +15,13 @@
       "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/crypto.tgz"
     },
     {
+      "id": "sonos",
+      "name": "Sonos Player",
+      "version": "1.0.0",
+      "description": "Native Sonos UPnP / SOAP controller met favorieten, radio en volume.",
+      "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/sonos.tgz"
+    },
+    {
       "id": "domoticz",
       "name": "Domoticz Home Automation",
       "version": "1.0.0",
