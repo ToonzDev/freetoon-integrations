@@ -127,4 +127,7 @@ void sonos_play_spotify_playlist_track(const char * playlist_uri, int track_nr, 
 /* Spotify Music Search */
 int  sonos_spotify_search(const char * query, sonos_search_result_t * result);
 
+/* String sanitation for fonts lacking unicode punctuation (quotes, dashes, etc.) */
+void sonos_sanitize_utf8(char * str);
+
 #endif

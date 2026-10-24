@@ -287,6 +287,7 @@ static void populate_items_list(void) {
         lv_obj_align(ico, LV_ALIGN_LEFT_MID, SX(4), 0);
 
         lv_obj_t * lbl = lv_label_create(btn);
+        sonos_sanitize_utf8(s_items[i].name);
         lv_label_set_text(lbl, s_items[i].name);
         lv_obj_set_style_text_color(lbl, lv_color_hex(THEME_TEXT_HI), 0);
         lv_obj_set_style_text_font(lbl, SF(18), 0);
@@ -397,6 +398,10 @@ static void sonos_modal_tick_cb(lv_timer_t * t) {
     }
 
     /* Track metadata */
+    sonos_sanitize_utf8(st.title);
+    sonos_sanitize_utf8(st.artist);
+    sonos_sanitize_utf8(st.album);
+    sonos_sanitize_utf8(s_pending_name);
     if (s_lbl_title) {
         if (st.title[0]) lv_label_set_text(s_lbl_title, st.title);
         else if (s_pending_name[0]) lv_label_set_text(s_lbl_title, s_pending_name);
@@ -551,8 +556,10 @@ static void populate_tracks_list(void) {
 
         /* Title & Artist label */
         lv_obj_t * lbl = lv_label_create(btn);
+        sonos_sanitize_utf8(s_tracks[i].title);
+        sonos_sanitize_utf8(s_tracks[i].artist);
         if (s_tracks[i].artist[0]) {
-            lv_label_set_text_fmt(lbl, "%s  —  %s", s_tracks[i].title, s_tracks[i].artist);
+            lv_label_set_text_fmt(lbl, "%s - %s", s_tracks[i].title, s_tracks[i].artist);
         } else {
             lv_label_set_text(lbl, s_tracks[i].title);
         }
@@ -580,6 +587,7 @@ static void open_playlist_tracks_view(const char * name, const char * id_or_uri,
     close_playlist_tracks_view();
 
     snprintf(s_cur_playlist_name, sizeof s_cur_playlist_name, "%s", name ? name : "");
+    sonos_sanitize_utf8(s_cur_playlist_name);
     snprintf(s_cur_playlist_id, sizeof s_cur_playlist_id, "%s", id_or_uri ? id_or_uri : "");
     s_tracks_source = src;
     s_track_count = 0;
@@ -742,13 +750,26 @@ static void on_ta_search_click(lv_event_t * e) {
     }
 }
 
+static void set_cat_btn_style(lv_obj_t * btn, bool selected) {
+    if (!btn) return;
+    if (selected) {
+        lv_obj_set_style_bg_color(btn, lv_color_hex(THEME_ACCENT_BLUE), 0);
+        lv_obj_set_style_border_width(btn, 0, 0);
+        lv_obj_t * l = lv_obj_get_child(btn, 0);
+        if (l) lv_obj_set_style_text_color(l, lv_color_hex(0xffffff), 0);
+    } else {
+        lv_obj_set_style_bg_color(btn, lv_color_hex(THEME_BTN_BG), 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_color(btn, lv_color_hex(THEME_BORDER), 0);
+        lv_obj_t * l = lv_obj_get_child(btn, 0);
+        if (l) lv_obj_set_style_text_color(l, lv_color_hex(THEME_TEXT_HI), 0);
+    }
+}
+
 static void update_cat_buttons_style(void) {
-    if (s_btn_cat_tracks)
-        lv_obj_set_style_bg_color(s_btn_cat_tracks, lv_color_hex(s_search_cat == SONOS_SEARCH_TRACKS ? THEME_ACCENT_BLUE : THEME_BTN_BG), 0);
-    if (s_btn_cat_albums)
-        lv_obj_set_style_bg_color(s_btn_cat_albums, lv_color_hex(s_search_cat == SONOS_SEARCH_ALBUMS ? THEME_ACCENT_BLUE : THEME_BTN_BG), 0);
-    if (s_btn_cat_playlists)
-        lv_obj_set_style_bg_color(s_btn_cat_playlists, lv_color_hex(s_search_cat == SONOS_SEARCH_PLAYLISTS ? THEME_ACCENT_BLUE : THEME_BTN_BG), 0);
+    set_cat_btn_style(s_btn_cat_tracks, s_search_cat == SONOS_SEARCH_TRACKS);
+    set_cat_btn_style(s_btn_cat_albums, s_search_cat == SONOS_SEARCH_ALBUMS);
+    set_cat_btn_style(s_btn_cat_playlists, s_search_cat == SONOS_SEARCH_PLAYLISTS);
 }
 
 static void on_cat_click(lv_event_t * e) {
@@ -809,6 +830,7 @@ static void populate_search_results(void) {
         lv_obj_t * l = lv_obj_get_child(s_btn_cat_playlists, 0);
         if (l) lv_label_set_text_fmt(l, "%s (%d)", tr("Playlists", "Playlists"), s_search_res.playlist_count);
     }
+    update_cat_buttons_style();
 
     int count = 0;
     if (s_search_cat == SONOS_SEARCH_TRACKS) count = s_search_res.track_count;
@@ -857,11 +879,17 @@ static void populate_search_results(void) {
         lv_obj_set_style_text_font(ico, SF(18), 0);
         lv_obj_align(ico, LV_ALIGN_LEFT_MID, SX(4), 0);
 
+        char s_name[96], s_art[64];
+        snprintf(s_name, sizeof s_name, "%s", name);
+        snprintf(s_art, sizeof s_art, "%s", artist);
+        sonos_sanitize_utf8(s_name);
+        sonos_sanitize_utf8(s_art);
+
         lv_obj_t * lbl = lv_label_create(btn);
-        if (artist && artist[0]) {
-            lv_label_set_text_fmt(lbl, "%s  —  %s", name, artist);
+        if (s_art[0]) {
+            lv_label_set_text_fmt(lbl, "%s - %s", s_name, s_art);
         } else {
-            lv_label_set_text(lbl, name);
+            lv_label_set_text(lbl, s_name);
         }
         lv_obj_set_style_text_color(lbl, lv_color_hex(THEME_TEXT_HI), 0);
         lv_obj_set_style_text_font(lbl, SF(16), 0);
@@ -929,12 +957,12 @@ static void open_search_view(void) {
     lv_obj_t * btn_go = lv_btn_create(s_search_modal);
     lv_obj_set_size(btn_go, SX(110), SY(46));
     lv_obj_set_pos(btn_go, SX(590), SY(60));
-    lv_obj_set_style_bg_color(btn_go, lv_color_hex(0x22cc66), 0);
+    lv_obj_set_style_bg_color(btn_go, lv_color_hex(settings.home_light_mode ? 0x2563eb : 0x38bdf8), 0);
     lv_obj_set_style_radius(btn_go, 10, 0);
     lv_obj_add_event_cb(btn_go, on_search_go_click, LV_EVENT_CLICKED, NULL);
     lv_obj_t * gol = lv_label_create(btn_go);
     lv_label_set_text(gol, tr("Zoek", "Search"));
-    lv_obj_set_style_text_color(gol, lv_color_hex(0xffffff), 0);
+    lv_obj_set_style_text_color(gol, lv_color_hex(settings.home_light_mode ? 0xffffff : 0x0f1a2a), 0);
     lv_obj_set_style_text_font(gol, SF(16), 0);
     lv_obj_center(gol);
 
@@ -1102,7 +1130,7 @@ lv_obj_t * screen_create(void) {
         lv_obj_t * sch = lv_label_create(b_search);
         lv_label_set_text(sch, tr("Zoek", "Search"));
         lv_obj_set_style_text_font(sch, SF(17), 0);
-        lv_obj_set_style_text_color(sch, lv_color_hex(0x22cc66), 0);
+        lv_obj_set_style_text_color(sch, lv_color_hex(THEME_TEXT_HI), 0);
         lv_obj_center(sch);
     }
 

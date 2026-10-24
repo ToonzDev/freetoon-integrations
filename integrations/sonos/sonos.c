@@ -176,6 +176,84 @@ static void xml_unescape_in_place(char * s) {
     }
 }
 
+void sonos_sanitize_utf8(char * str) {
+    if (!str || !*str) return;
+    unsigned char * r = (unsigned char *)str;
+    char * w = str;
+
+    while (*r) {
+        /* Skip 4-byte UTF-8 sequences (emojis, etc. U+10000..U+1FFFFF) */
+        if ((r[0] & 0xF8) == 0xF0) {
+            r += 4;
+            continue;
+        }
+        /* Check 3-byte UTF-8 punctuation */
+        if (r[0] == 0xE2 && r[1] == 0x80) {
+            unsigned char b3 = r[2];
+            if (b3 >= 0x98 && b3 <= 0x9B) { /* ‘ ’ ‚ ‛ */
+                *w++ = '\'';
+                r += 3;
+                continue;
+            } else if (b3 >= 0x9C && b3 <= 0x9F) { /* “ ” „ ‟ */
+                *w++ = '"';
+                r += 3;
+                continue;
+            } else if (b3 >= 0x90 && b3 <= 0x95) { /* ‐ ‑ ‒ – — ― */
+                *w++ = '-';
+                r += 3;
+                continue;
+            } else if (b3 == 0xA6) { /* … (ellipsis) */
+                *w++ = '.';
+                r += 3;
+                continue;
+            } else if (b3 == 0xA2) { /* • (bullet) */
+                *w++ = '-';
+                r += 3;
+                continue;
+            } else if (b3 == 0x8B) { /* Zero-width space */
+                r += 3;
+                continue;
+            }
+        }
+        /* Check 3-byte UTF-8 primes / apostrophes */
+        if (r[0] == 0xE2 && r[1] == 0x80 && (r[2] == 0xB2 || r[2] == 0xB3)) { /* ′ ″ */
+            *w++ = (r[2] == 0xB2) ? '\'' : '"';
+            r += 3;
+            continue;
+        }
+        /* Check 3-byte UTF-8 variation selector (e.g. U+FE0F) or BOM (U+FEFF) */
+        if (r[0] == 0xEF && r[1] == 0xB8 && r[2] == 0x8F) {
+            r += 3;
+            continue;
+        }
+        if (r[0] == 0xEF && r[1] == 0xBB && r[2] == 0xBF) {
+            r += 3;
+            continue;
+        }
+        /* Check 2-byte UTF-8 sequences starting with 0xC2 */
+        if (r[0] == 0xC2) {
+            if (r[1] == 0xA0) { /* Non-breaking space */
+                *w++ = ' ';
+                r += 2;
+                continue;
+            } else if (r[1] == 0xAD) { /* Soft hyphen */
+                r += 2;
+                continue;
+            } else if (r[1] == 0xB4) { /* Acute accent ´ */
+                *w++ = '\'';
+                r += 2;
+                continue;
+            } else if (r[1] == 0xAB || r[1] == 0xBB) { /* « » */
+                *w++ = '"';
+                r += 2;
+                continue;
+            }
+        }
+        *w++ = (char)*r++;
+    }
+    *w = '\0';
+}
+
 static void clean_url(char * url) {
     if (!url) return;
     char * p;
@@ -249,6 +327,7 @@ static int extract_xml_tag(const char * xml, const char * tag, char * out, size_
     out[o] = 0;
 
     xml_unescape_in_place(out);
+    sonos_sanitize_utf8(out);
     return (o > 0);
 }
 
@@ -280,6 +359,7 @@ static int extract_xml_attr(const char * xml, const char * attr, char * out, siz
     memcpy(out, p, len);
     out[len] = 0;
     xml_unescape_in_place(out);
+    sonos_sanitize_utf8(out);
     return 1;
 }
 
@@ -1091,6 +1171,9 @@ static void poll_state(void) {
         xml_unescape_in_place(st.title);
         xml_unescape_in_place(st.artist);
         xml_unescape_in_place(st.album);
+        sonos_sanitize_utf8(st.title);
+        sonos_sanitize_utf8(st.artist);
+        sonos_sanitize_utf8(st.album);
 
         if (art[0]) {
             if (art[0] == '/') {
@@ -1891,10 +1974,45 @@ static int extract_json_str(const char * src, const char * key, char * out, size
     p++;
     size_t n = 0;
     while (*p && *p != '"' && n + 1 < outsz) {
-        if (*p == '\\' && p[1]) p++;
+        if (*p == '\\') {
+            if (p[1] == 'u' && isxdigit((unsigned char)p[2]) && isxdigit((unsigned char)p[3]) &&
+                isxdigit((unsigned char)p[4]) && isxdigit((unsigned char)p[5])) {
+                char h[5] = { p[2], p[3], p[4], p[5], 0 };
+                unsigned int code = (unsigned int)strtoul(h, NULL, 16);
+                p += 6;
+                if (code == 0x2018 || code == 0x2019 || code == 0x201A || code == 0x201B || code == 0x2032) {
+                    out[n++] = '\'';
+                } else if (code == 0x201C || code == 0x201D || code == 0x201E || code == 0x201F || code == 0x2033) {
+                    out[n++] = '"';
+                } else if (code == 0x2013 || code == 0x2014 || code == 0x2015 || code == 0x2022) {
+                    out[n++] = '-';
+                } else if (code == 0x2026) {
+                    out[n++] = '.';
+                } else if (code == 0x00A0) {
+                    out[n++] = ' ';
+                } else if (code < 0x80) {
+                    out[n++] = (char)code;
+                } else if (code <= 0x7FF && n + 2 < outsz) {
+                    out[n++] = (char)(0xC0 | ((code >> 6) & 0x1F));
+                    out[n++] = (char)(0x80 | (code & 0x3F));
+                } else if (n + 3 < outsz) {
+                    out[n++] = (char)(0xE0 | ((code >> 12) & 0x0F));
+                    out[n++] = (char)(0x80 | ((code >> 6) & 0x3F));
+                    out[n++] = (char)(0x80 | (code & 0x3F));
+                }
+                continue;
+            } else if (p[1] == 'n' || p[1] == 'r') {
+                out[n++] = ' ';
+                p += 2;
+                continue;
+            } else if (p[1]) {
+                p++;
+            }
+        }
         out[n++] = *p++;
     }
     out[n] = 0;
+    sonos_sanitize_utf8(out);
     return 1;
 }
 
@@ -2051,6 +2169,7 @@ static int parse_spotify_playlists(const char * json, sonos_item_t items[], int 
             }
         }
         if (name[0] && uri[0]) {
+            sonos_sanitize_utf8(name);
             snprintf(items[count].name, sizeof items[count].name, "%s", name);
             snprintf(items[count].uri, sizeof items[count].uri, "%s", uri);
             count++;
