@@ -32,6 +32,7 @@ static lv_obj_t * s_pos_container = NULL;
 static lv_obj_t * s_lbl_vol = NULL;
 static lv_obj_t * s_fav_list = NULL;
 static lv_obj_t * s_lbl_fav_msg = NULL;
+static lv_obj_t * s_lbl_zone_msg = NULL;
 static lv_timer_t * s_refresh_timer = NULL;
 
 /* Forward declarations */
@@ -59,6 +60,11 @@ static volatile int        s_items_loading = 0;
 static volatile int        s_items_ready = 0;
 static volatile int        s_tracks_ready = 0;
 static volatile int        s_search_ready = 0;
+static char                s_probed_rooms[SONOS_MAX_ZONES][48];
+static int                 s_probe_count = 0;
+static volatile int        s_zone_probing = 0;
+static volatile int        s_zone_probe_ready = 0;
+static uint32_t            s_zone_msg_until = 0;
 
 static void * items_loader_thread(void * arg) {
     (void)arg;
@@ -110,28 +116,45 @@ static void on_close_click(lv_event_t * e) {
     s_lbl_play = NULL;
     s_fav_list = NULL;
     s_lbl_fav_msg = NULL;
+    s_lbl_zone_msg = NULL;
     s_pos_dragging = false;
     s_art_last_ver = -1;
     s_pending_name[0] = 0;
     s_pending_until = 0;
+    s_zone_probing = 0;
+    s_zone_probe_ready = 0;
+    s_zone_msg_until = 0;
 }
 
-static void on_settings_click(lv_event_t * e) {
-    (void)e;
-    char rooms[SONOS_MAX_ZONES][48];
-    int n_rooms = sonos_probe(rooms, SONOS_MAX_ZONES);
-    if (n_rooms > 0 && s_dd_zone) {
-        char opts[1024] = "";
-        int sel_idx = 0;
-        for (int i = 0; i < n_rooms; i++) {
-            if (opts[0]) strncat(opts, "\n", sizeof opts - strlen(opts) - 1);
-            strncat(opts, rooms[i], sizeof opts - strlen(opts) - 1);
-            if (settings.sonos_zone[0] && strcmp(settings.sonos_zone, rooms[i]) == 0)
-                sel_idx = i;
-        }
-        lv_dropdown_set_options(s_dd_zone, opts);
-        lv_dropdown_set_selected(s_dd_zone, sel_idx);
+static void * zone_probe_thread(void * arg) {
+    (void)arg;
+    s_probe_count = sonos_probe(s_probed_rooms, SONOS_MAX_ZONES);
+    s_zone_probe_ready = 1;
+    s_zone_probing = 0;
+    return NULL;
+}
+
+static void trigger_zone_probe(void) {
+    if (s_zone_probing) return;
+    s_zone_probing = 1;
+    s_zone_probe_ready = 0;
+    if (s_lbl_zone_msg) {
+        lv_label_set_text(s_lbl_zone_msg, tr("Zoeken...", "Searching..."));
+        lv_obj_set_style_text_color(s_lbl_zone_msg, lv_color_hex(THEME_TEXT_DIM), 0);
+        lv_obj_clear_flag(s_lbl_zone_msg, LV_OBJ_FLAG_HIDDEN);
     }
+    pthread_t tid;
+    if (pthread_create(&tid, NULL, zone_probe_thread, NULL) == 0) {
+        pthread_detach(tid);
+    } else {
+        s_zone_probing = 0;
+        if (s_lbl_zone_msg) lv_obj_add_flag(s_lbl_zone_msg, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void on_refresh_zone_click(lv_event_t * e) {
+    (void)e;
+    trigger_zone_probe();
 }
 
 static void on_play_pause_click(lv_event_t * e) {
@@ -300,6 +323,44 @@ static void populate_items_list(void) {
 static void sonos_modal_tick_cb(lv_timer_t * t) {
     (void)t;
     if (!s_modal) return;
+
+    /* Check if background zone probe completed */
+    if (s_zone_probe_ready) {
+        s_zone_probe_ready = 0;
+        if (s_dd_zone && s_probe_count > 0) {
+            char opts[1024] = "";
+            int sel_idx = 0;
+            for (int i = 0; i < s_probe_count; i++) {
+                if (opts[0]) strncat(opts, "\n", sizeof opts - strlen(opts) - 1);
+                strncat(opts, s_probed_rooms[i], sizeof opts - strlen(opts) - 1);
+                if (settings.sonos_zone[0] && strcmp(settings.sonos_zone, s_probed_rooms[i]) == 0)
+                    sel_idx = i;
+            }
+            lv_dropdown_set_options(s_dd_zone, opts);
+            lv_dropdown_set_selected(s_dd_zone, sel_idx);
+        }
+        if (s_lbl_zone_msg) {
+            if (s_probe_count <= 0) {
+                lv_label_set_text(s_lbl_zone_msg, tr("Geen kamers gevonden", "No rooms found"));
+                lv_obj_set_style_text_color(s_lbl_zone_msg, lv_color_hex(0xff4444), 0);
+            } else if (s_probe_count == 1) {
+                lv_label_set_text(s_lbl_zone_msg, tr("1 kamer gevonden", "1 room found"));
+                lv_obj_set_style_text_color(s_lbl_zone_msg, lv_color_hex(THEME_ACCENT_BLUE), 0);
+            } else {
+                lv_label_set_text_fmt(s_lbl_zone_msg, "%d %s", s_probe_count, tr("kamers gevonden", "rooms found"));
+                lv_obj_set_style_text_color(s_lbl_zone_msg, lv_color_hex(THEME_ACCENT_BLUE), 0);
+            }
+            lv_obj_clear_flag(s_lbl_zone_msg, LV_OBJ_FLAG_HIDDEN);
+            s_zone_msg_until = lv_tick_get() + 5000;
+        }
+    }
+
+    if (s_zone_msg_until && lv_tick_get() > s_zone_msg_until) {
+        s_zone_msg_until = 0;
+        if (s_lbl_zone_msg && !s_zone_probing) {
+            lv_obj_add_flag(s_lbl_zone_msg, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
 
     /* Check if background items load completed */
     if (s_items_ready) {
@@ -1084,12 +1145,33 @@ lv_obj_t * screen_create(void) {
     }
 
     s_dd_zone = lv_dropdown_create(s_modal);
-    lv_obj_set_size(s_dd_zone, SX(260), SY(48));
-    lv_obj_align(s_dd_zone, LV_ALIGN_TOP_LEFT, SX(150), SY(12));
+    lv_obj_set_size(s_dd_zone, SX(240), SY(48));
+    lv_obj_align(s_dd_zone, LV_ALIGN_TOP_LEFT, SX(140), SY(12));
     lv_obj_set_style_text_font(s_dd_zone, SF(18), 0);
     lv_dropdown_set_options(s_dd_zone, opts);
     lv_dropdown_set_selected(s_dd_zone, sel_idx);
     lv_obj_add_event_cb(s_dd_zone, on_zone_change, LV_EVENT_VALUE_CHANGED, NULL);
+
+    /* Refresh button to the right of room dropdown */
+    lv_obj_t * b_refresh = lv_btn_create(s_modal);
+    lv_obj_set_size(b_refresh, SX(50), SY(48));
+    lv_obj_align(b_refresh, LV_ALIGN_TOP_LEFT, SX(388), SY(12));
+    lv_obj_set_style_bg_color(b_refresh, lv_color_hex(THEME_BTN_BG), 0);
+    lv_obj_set_style_radius(b_refresh, 10, 0);
+    lv_obj_set_ext_click_area(b_refresh, 15);
+    lv_obj_add_event_cb(b_refresh, on_refresh_zone_click, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * z_rl = lv_label_create(b_refresh);
+    lv_label_set_text(z_rl, LV_SYMBOL_REFRESH);
+    lv_obj_set_style_text_font(z_rl, SF(20), 0);
+    lv_obj_set_style_text_color(z_rl, lv_color_hex(THEME_TEXT_HI), 0);
+    lv_obj_center(z_rl);
+
+    /* Status message next to the refresh button */
+    s_lbl_zone_msg = lv_label_create(s_modal);
+    lv_obj_set_style_text_font(s_lbl_zone_msg, SF(16), 0);
+    lv_obj_set_style_text_color(s_lbl_zone_msg, lv_color_hex(THEME_ACCENT_BLUE), 0);
+    lv_obj_align(s_lbl_zone_msg, LV_ALIGN_TOP_LEFT, SX(448), SY(26));
+    lv_obj_add_flag(s_lbl_zone_msg, LV_OBJ_FLAG_HIDDEN);
 
     /* Close button */
     int cb_w = (DISP_HOR < 1000) ? 68 : 76;
@@ -1107,25 +1189,11 @@ lv_obj_t * screen_create(void) {
     lv_obj_set_style_text_color(cl, lv_color_hex(THEME_TEXT_HI), 0);
     lv_obj_center(cl);
 
-    /* Settings button (matching size, to the left of the close button) */
-    lv_obj_t * b_set = lv_btn_create(s_modal);
-    lv_obj_set_size(b_set, cb_w, cb_h);
-    lv_obj_align(b_set, LV_ALIGN_TOP_RIGHT, SX(-12) - cb_w - SX(10), SY(8));
-    lv_obj_set_style_bg_color(b_set, lv_color_hex(THEME_BTN_BG), 0);
-    lv_obj_set_style_radius(b_set, 10, 0);
-    lv_obj_set_ext_click_area(b_set, 25);
-    lv_obj_add_event_cb(b_set, on_settings_click, LV_EVENT_CLICKED, NULL);
-    lv_obj_t * sl = lv_label_create(b_set);
-    lv_label_set_text(sl, LV_SYMBOL_SETTINGS);
-    lv_obj_set_style_text_font(sl, SF(22), 0);
-    lv_obj_set_style_text_color(sl, lv_color_hex(THEME_TEXT_HI), 0);
-    lv_obj_center(sl);
-
     /* Search button (if Spotify configured) */
     if (s_spot_cfg.configured || s_spot_cfg.user_count > 0) {
         lv_obj_t * b_search = lv_btn_create(s_modal);
         lv_obj_set_size(b_search, cb_w, cb_h);
-        lv_obj_align(b_search, LV_ALIGN_TOP_RIGHT, SX(-12) - 2 * (cb_w + SX(10)), SY(8));
+        lv_obj_align(b_search, LV_ALIGN_TOP_RIGHT, SX(-12) - cb_w - SX(10), SY(8));
         lv_obj_set_style_bg_color(b_search, lv_color_hex(THEME_BTN_BG), 0);
         lv_obj_set_style_radius(b_search, 10, 0);
         lv_obj_set_ext_click_area(b_search, 25);
