@@ -1425,13 +1425,15 @@ static int get_sonos_playlists(sonos_item_t items[], int max_items) {
         if (e4 && (!end_item || e4 < end_item)) end_item = e4;
         if (!end_item) break;
 
-        char title[64] = "", uri[128] = "";
+        char title[64] = "", uri[128] = "", id[64] = "";
+        extract_xml_attr(cur, "id", id, sizeof id);
         extract_xml_tag(cur, "dc:title", title, sizeof title);
         extract_xml_tag(cur, "res", uri, sizeof uri);
 
         if (title[0]) {
             snprintf(items[count].name, sizeof items[0].name, "%s", title);
             snprintf(items[count].uri, sizeof items[0].uri, "%s", uri);
+            snprintf(items[count].id, sizeof items[0].id, "%s", id[0] ? id : uri);
             count++;
         }
         cur = end_item + 7;
@@ -1613,6 +1615,7 @@ typedef struct {
     char uri[512];
     char meta[1536];
     char name[64];
+    int  first_track;
     int  seq;
 } enqueue_play_req_t;
 
@@ -1709,7 +1712,18 @@ static void * enqueue_play_worker(void * arg) {
                             "SetAVTransportURI", set_body, NULL, 0, 3);
     }
 
-    /* 6. Start playback with retry in case speaker is still transitioning */
+    /* 6. Seek to first_track if specified */
+    if (req->first_track > 1) {
+        char seek_body[128];
+        snprintf(seek_body, sizeof seek_body,
+                 "<InstanceID>0</InstanceID><Unit>TRACK_NR</Unit><Target>%d</Target>",
+                 req->first_track);
+        sonos_soap(active_ip, "/MediaRenderer/AVTransport/Control",
+                   "urn:schemas-upnp-org:service:AVTransport:1",
+                   "Seek", seek_body, NULL, 0, 3);
+    }
+
+    /* 7. Start playback with retry in case speaker is still transitioning */
     int play_ok = 0;
     for (int retry = 0; retry < 5; retry++) {
         int rc = sonos_soap(active_ip, "/MediaRenderer/AVTransport/Control",
@@ -1741,11 +1755,12 @@ static void sonos_enqueue_and_play(const char * uri, const char * meta, const ch
     if (!settings.sonos_enabled || !g_active_ip[0]) return;
     if ((!uri || !uri[0]) && (!name || !name[0])) return;
 
-    enqueue_play_req_t * req = malloc(sizeof *req);
+    enqueue_play_req_t * req = calloc(1, sizeof *req);
     if (!req) return;
     snprintf(req->uri, sizeof req->uri, "%s", uri ? uri : "");
     snprintf(req->meta, sizeof req->meta, "%s", meta ? meta : "");
     snprintf(req->name, sizeof req->name, "%s", name ? name : "");
+    req->first_track = 1;
     req->seq = ++s_enqueue_seq;
 
     pthread_t t;
@@ -1765,6 +1780,26 @@ void sonos_play_playlist(const char * name) {
     }
 }
 
+void sonos_play_playlist_track(const char * name, int track_nr) {
+    if (!name || !name[0] || !g_active_ip[0]) return;
+    enqueue_play_req_t * req = calloc(1, sizeof *req);
+    if (!req) return;
+    if (strncmp(name, "file://", 7) == 0) {
+        snprintf(req->uri, sizeof req->uri, "%s", name);
+    } else {
+        snprintf(req->name, sizeof req->name, "%s", name);
+    }
+    req->first_track = track_nr > 0 ? track_nr : 1;
+    req->seq = ++s_enqueue_seq;
+
+    pthread_t t;
+    if (pthread_create(&t, NULL, enqueue_play_worker, req) == 0) {
+        pthread_detach(t);
+    } else {
+        free(req);
+    }
+}
+
 void sonos_play_spotify(const char * uri) {
     if (!uri || !uri[0] || !g_active_ip[0]) return;
 
@@ -1773,7 +1808,13 @@ void sonos_play_spotify(const char * uri) {
         url_encode(uri, enc_uri, sizeof enc_uri);
 
         char cp_uri[384];
-        snprintf(cp_uri, sizeof cp_uri, "x-rincon-cpcontainer:0006206c%s", enc_uri);
+        if (strncmp(uri, "spotify:album:", 14) == 0) {
+            snprintf(cp_uri, sizeof cp_uri, "x-rincon-cpcontainer:0004206c%s", enc_uri);
+        } else if (strncmp(uri, "spotify:track:", 14) == 0) {
+            snprintf(cp_uri, sizeof cp_uri, "x-sonos-spotify:%s?sid=9&amp;flags=8224&amp;sn=1", enc_uri);
+        } else {
+            snprintf(cp_uri, sizeof cp_uri, "x-rincon-cpcontainer:0006206c%s", enc_uri);
+        }
 
         char didl[1024];
         snprintf(didl, sizeof didl,
@@ -1791,6 +1832,44 @@ void sonos_play_spotify(const char * uri) {
         sonos_enqueue_and_play(cp_uri, didl, "");
     } else {
         sonos_enqueue_and_play(uri, "", "");
+    }
+}
+
+void sonos_play_spotify_playlist_track(const char * playlist_uri, int track_nr, const char * track_uri) {
+    if (!playlist_uri || !playlist_uri[0] || !g_active_ip[0]) return;
+    (void)track_uri;
+
+    char enc_uri[256];
+    url_encode(playlist_uri, enc_uri, sizeof enc_uri);
+
+    char cp_uri[384];
+    snprintf(cp_uri, sizeof cp_uri, "x-rincon-cpcontainer:0006206c%s", enc_uri);
+
+    char didl[1024];
+    snprintf(didl, sizeof didl,
+        "&lt;DIDL-Lite xmlns:dc=\"http://purl.org/dc/elements/1.1/\" "
+        "xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" "
+        "xmlns:r=\"urn:schemas-rinconnetworks-com:metadata-1-0/\" "
+        "xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\"&gt;"
+        "&lt;item id=\"00030020%s\" restricted=\"true\"&gt;"
+        "&lt;upnp:class&gt;object.item.audioItem.musicTrack&lt;/upnp:class&gt;"
+        "&lt;desc id=\"cdudn\" nameSpace=\"urn:schemas-rinconnetworks-com:metadata-1-0/\"&gt;"
+        "SA_RINCON2311_X_#Svc2311-0-Token&lt;/desc&gt;"
+        "&lt;/item&gt;&lt;/DIDL-Lite&gt;",
+        enc_uri);
+
+    enqueue_play_req_t * req = calloc(1, sizeof *req);
+    if (!req) return;
+    snprintf(req->uri, sizeof req->uri, "%s", cp_uri);
+    snprintf(req->meta, sizeof req->meta, "%s", didl);
+    req->first_track = track_nr > 0 ? track_nr : 1;
+    req->seq = ++s_enqueue_seq;
+
+    pthread_t t;
+    if (pthread_create(&t, NULL, enqueue_play_worker, req) == 0) {
+        pthread_detach(t);
+    } else {
+        free(req);
     }
 }
 
@@ -2021,4 +2100,269 @@ int sonos_get_source_items(sonos_source_t src, int spotify_user_idx, sonos_item_
         return count;
     }
     return 0;
+}
+
+/* =========================================================================
+ * Playlist Tracks & Search Implementation
+ * ========================================================================= */
+
+static int get_sonos_playlist_tracks(const char * obj_id, sonos_track_t tracks[], int max_tracks) {
+    if (!g_active_ip[0] && g_bootstrap_ip[0]) update_topology(g_bootstrap_ip);
+    if (!g_active_ip[0] || !obj_id || !obj_id[0] || max_tracks <= 0) return 0;
+
+    char * buf = malloc(131072);
+    if (!buf) return 0;
+    buf[0] = 0;
+
+    char esc_id[128];
+    xml_escape(obj_id, esc_id, sizeof esc_id);
+
+    char args[384];
+    snprintf(args, sizeof args,
+        "<ObjectID>%s</ObjectID><BrowseFlag>BrowseDirectChildren</BrowseFlag>"
+        "<Filter>*</Filter><StartingIndex>0</StartingIndex><RequestedCount>%d</RequestedCount><SortCriteria></SortCriteria>",
+        esc_id, max_tracks);
+
+    int rc = sonos_soap(g_active_ip, "/MediaServer/ContentDirectory/Control",
+                        "urn:schemas-upnp-org:service:ContentDirectory:1",
+                        "Browse", args, buf, 131072, 4);
+    if (rc != 0 || buf[0] == 0) {
+        free(buf);
+        return 0;
+    }
+
+    int count = 0;
+    const char * cur = buf;
+    while (cur && count < max_tracks) {
+        const char * p1 = strstr(cur, "<item");
+        const char * p2 = strstr(cur, "&lt;item");
+        const char * p = NULL;
+        if (p1 && (!p || p1 < p)) p = p1;
+        if (p2 && (!p || p2 < p)) p = p2;
+        if (!p) break;
+        cur = p;
+
+        const char * e1 = strstr(cur, "</item>");
+        const char * e2 = strstr(cur, "&lt;/item&gt;");
+        const char * end_item = NULL;
+        if (e1 && (!end_item || e1 < end_item)) end_item = e1;
+        if (e2 && (!end_item || e2 < end_item)) end_item = e2;
+        if (!end_item) break;
+
+        char title[96] = "", artist[64] = "", album[64] = "", uri[256] = "", dur[32] = "";
+        extract_xml_tag(cur, "dc:title", title, sizeof title);
+        extract_xml_tag(cur, "dc:creator", artist, sizeof artist);
+        if (!artist[0]) extract_xml_tag(cur, "upnp:artist", artist, sizeof artist);
+        extract_xml_tag(cur, "upnp:album", album, sizeof album);
+        extract_xml_tag(cur, "res", uri, sizeof uri);
+        extract_xml_attr(cur, "duration", dur, sizeof dur);
+
+        if (title[0]) {
+            snprintf(tracks[count].title, sizeof tracks[0].title, "%s", title);
+            snprintf(tracks[count].artist, sizeof tracks[0].artist, "%s", artist);
+            snprintf(tracks[count].album, sizeof tracks[0].album, "%s", album);
+            snprintf(tracks[count].uri, sizeof tracks[0].uri, "%s", uri);
+            tracks[count].track_nr = count + 1;
+            if (dur[0]) {
+                int h = 0, m = 0, s = 0;
+                if (sscanf(dur, "%d:%d:%d", &h, &m, &s) == 3) {
+                    tracks[count].duration = h * 3600 + m * 60 + s;
+                } else if (sscanf(dur, "%d:%d", &m, &s) == 2) {
+                    tracks[count].duration = m * 60 + s;
+                }
+            }
+            count++;
+        }
+        cur = end_item + 7;
+    }
+    free(buf);
+    return count;
+}
+
+static int get_spotify_playlist_tracks(const char * uri, sonos_track_t tracks[], int max_tracks) {
+    if (!uri || !uri[0] || max_tracks <= 0) return 0;
+    sonos_spotify_cfg_t cfg;
+    sonos_get_spotify_config(&cfg);
+    if (!cfg.configured) return 0;
+
+    char token[300] = "";
+    if (get_spotify_token(&cfg, token, sizeof token) != 0 || !token[0]) return 0;
+
+    const char * id = uri;
+    if (strncmp(id, "spotify:playlist:", 17) == 0) id += 17;
+    else if (strstr(id, ":playlist:")) id = strstr(id, ":playlist:") + 10;
+
+    char cmd[512];
+    snprintf(cmd, sizeof cmd,
+        "/usr/bin/curl -s -4 -k --max-time 8 --connect-timeout 4 "
+        "-H 'Authorization: Bearer %s' "
+        "'https://api.spotify.com/v1/playlists/%s/tracks?limit=%d'",
+        token, id, max_tracks > 50 ? 50 : max_tracks);
+
+    FILE * fp = popen(cmd, "r");
+    if (!fp) return 0;
+    char * resp = malloc(65536);
+    if (!resp) { pclose(fp); return 0; }
+    size_t got = fread(resp, 1, 65535, fp);
+    pclose(fp);
+    resp[got] = 0;
+
+    int count = 0;
+    const char * cur = resp;
+    while ((cur = strstr(cur, "\"track\":")) != NULL && count < max_tracks) {
+        cur += 8;
+        const char * next_item = strstr(cur, "\"track\":");
+
+        char tname[96] = "", aname[64] = "", albname[64] = "", turi[128] = "";
+        int dur_ms = 0;
+
+        extract_json_str(cur, "name", tname, sizeof tname);
+        extract_json_str(cur, "uri", turi, sizeof turi);
+        extract_json_int(cur, "duration_ms", &dur_ms);
+
+        const char * art = strstr(cur, "\"artists\":");
+        if (art && (!next_item || art < next_item)) {
+            extract_json_str(art, "name", aname, sizeof aname);
+        }
+        const char * alb = strstr(cur, "\"album\":");
+        if (alb && (!next_item || alb < next_item)) {
+            extract_json_str(alb, "name", albname, sizeof albname);
+        }
+
+        if (tname[0]) {
+            snprintf(tracks[count].title, sizeof tracks[0].title, "%s", tname);
+            snprintf(tracks[count].artist, sizeof tracks[0].artist, "%s", aname);
+            snprintf(tracks[count].album, sizeof tracks[0].album, "%s", albname);
+            snprintf(tracks[count].uri, sizeof tracks[0].uri, "%s", turi);
+            tracks[count].duration = dur_ms / 1000;
+            tracks[count].track_nr = count + 1;
+            count++;
+        }
+    }
+    free(resp);
+    return count;
+}
+
+int sonos_get_playlist_tracks(sonos_source_t src, const char * id_or_uri, sonos_track_t tracks[], int max_tracks) {
+    if (!id_or_uri || !tracks || max_tracks <= 0) return 0;
+    if (src == SONOS_SRC_PLAYLISTS) {
+        return get_sonos_playlist_tracks(id_or_uri, tracks, max_tracks);
+    } else if (src == SONOS_SRC_SPOTIFY) {
+        return get_spotify_playlist_tracks(id_or_uri, tracks, max_tracks);
+    }
+    return 0;
+}
+
+int sonos_spotify_search(const char * query, sonos_search_result_t * result) {
+    if (!query || !query[0] || !result) return 0;
+    memset(result, 0, sizeof *result);
+
+    sonos_spotify_cfg_t cfg;
+    sonos_get_spotify_config(&cfg);
+    if (!cfg.configured) return 0;
+
+    char token[300] = "";
+    if (get_spotify_token(&cfg, token, sizeof token) != 0 || !token[0]) return 0;
+
+    char esc_q[128];
+    url_encode(query, esc_q, sizeof esc_q);
+
+    char cmd[512];
+    snprintf(cmd, sizeof cmd,
+        "/usr/bin/curl -s -4 -k --max-time 8 --connect-timeout 4 "
+        "-H 'Authorization: Bearer %s' "
+        "'https://api.spotify.com/v1/search?q=%s&type=track,album,playlist&limit=20'",
+        token, esc_q);
+
+    FILE * fp = popen(cmd, "r");
+    if (!fp) return 0;
+    char * resp = malloc(65536);
+    if (!resp) { pclose(fp); return 0; }
+    size_t got = fread(resp, 1, 65535, fp);
+    pclose(fp);
+    resp[got] = 0;
+
+    const char * tr_sec = strstr(resp, "\"tracks\":");
+    const char * alb_sec = strstr(resp, "\"albums\":");
+    const char * pl_sec = strstr(resp, "\"playlists\":");
+
+    /* 1. Parse tracks */
+    if (tr_sec) {
+        const char * cur = tr_sec;
+        while ((cur = strstr(cur, "\"name\":")) != NULL && result->track_count < 25) {
+            if (alb_sec && cur >= alb_sec) break;
+            if (pl_sec && cur >= pl_sec) break;
+
+            char name[96] = "", uri[128] = "", artist[64] = "";
+            int dur_ms = 0;
+            extract_json_str(cur, "name", name, sizeof name);
+            extract_json_str(cur, "uri", uri, sizeof uri);
+            extract_json_int(cur, "duration_ms", &dur_ms);
+
+            const char * art = strstr(cur, "\"artists\":");
+            if (art && (!alb_sec || art < alb_sec)) {
+                extract_json_str(art, "name", artist, sizeof artist);
+            }
+
+            if (name[0] && strncmp(uri, "spotify:track:", 14) == 0) {
+                snprintf(result->tracks[result->track_count].name, sizeof result->tracks[0].name, "%s", name);
+                snprintf(result->tracks[result->track_count].artist, sizeof result->tracks[0].artist, "%s", artist);
+                snprintf(result->tracks[result->track_count].uri, sizeof result->tracks[0].uri, "%s", uri);
+                result->tracks[result->track_count].duration = dur_ms / 1000;
+                result->track_count++;
+            }
+            cur += 7;
+        }
+    }
+
+    /* 2. Parse albums */
+    if (alb_sec) {
+        const char * cur = alb_sec;
+        while ((cur = strstr(cur, "\"name\":")) != NULL && result->album_count < 25) {
+            if (pl_sec && cur >= pl_sec) break;
+
+            char name[96] = "", uri[128] = "", artist[64] = "";
+            extract_json_str(cur, "name", name, sizeof name);
+            extract_json_str(cur, "uri", uri, sizeof uri);
+
+            const char * art = strstr(cur, "\"artists\":");
+            if (art && (!pl_sec || art < pl_sec)) {
+                extract_json_str(art, "name", artist, sizeof artist);
+            }
+
+            if (name[0] && strncmp(uri, "spotify:album:", 14) == 0) {
+                snprintf(result->albums[result->album_count].name, sizeof result->albums[0].name, "%s", name);
+                snprintf(result->albums[result->album_count].artist, sizeof result->albums[0].artist, "%s", artist);
+                snprintf(result->albums[result->album_count].uri, sizeof result->albums[0].uri, "%s", uri);
+                result->album_count++;
+            }
+            cur += 7;
+        }
+    }
+
+    /* 3. Parse playlists */
+    if (pl_sec) {
+        const char * cur = pl_sec;
+        while ((cur = strstr(cur, "\"name\":")) != NULL && result->playlist_count < 25) {
+            char name[96] = "", uri[128] = "", owner[64] = "";
+            extract_json_str(cur, "name", name, sizeof name);
+            extract_json_str(cur, "uri", uri, sizeof uri);
+
+            const char * ow = strstr(cur, "\"owner\":");
+            if (ow) {
+                extract_json_str(ow, "display_name", owner, sizeof owner);
+            }
+
+            if (name[0] && strstr(uri, ":playlist:")) {
+                snprintf(result->playlists[result->playlist_count].name, sizeof result->playlists[0].name, "%s", name);
+                snprintf(result->playlists[result->playlist_count].artist, sizeof result->playlists[0].artist, "%s", owner);
+                snprintf(result->playlists[result->playlist_count].uri, sizeof result->playlists[0].uri, "%s", uri);
+                result->playlist_count++;
+            }
+            cur += 7;
+        }
+    }
+
+    free(resp);
+    return result->track_count + result->album_count + result->playlist_count;
 }

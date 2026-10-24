@@ -57,6 +57,7 @@ void sonos_set_zone(const char * zone);
 void sonos_request_refresh(void);     /* immediate wake poll */
 
 #define SONOS_MAX_ITEMS 48
+#define SONOS_MAX_TRACKS 100
 
 typedef enum {
     SONOS_SRC_FAVORITES = 0,
@@ -67,7 +68,39 @@ typedef enum {
 typedef struct {
     char name[64];
     char uri[128];      /* For Spotify: spotify:playlist:... */
+    char id[64];        /* For Sonos ContentDirectory object id (e.g. SQ:1) */
 } sonos_item_t;
+
+typedef struct {
+    char title[96];
+    char artist[64];
+    char album[64];
+    char uri[256];
+    int  duration;       /* in seconds */
+    int  track_nr;       /* 1-based index in playlist */
+} sonos_track_t;
+
+typedef struct {
+    char name[96];       /* title / album / playlist name */
+    char artist[64];     /* artist or owner */
+    char uri[128];       /* spotify URI */
+    int  duration;       /* seconds (for tracks) */
+} sonos_search_item_t;
+
+typedef enum {
+    SONOS_SEARCH_TRACKS = 0,
+    SONOS_SEARCH_ALBUMS = 1,
+    SONOS_SEARCH_PLAYLISTS = 2
+} sonos_search_type_t;
+
+typedef struct {
+    sonos_search_item_t tracks[25];
+    int track_count;
+    sonos_search_item_t albums[25];
+    int album_count;
+    sonos_search_item_t playlists[25];
+    int playlist_count;
+} sonos_search_result_t;
 
 typedef struct {
     int  configured;
@@ -85,5 +118,13 @@ int  sonos_get_favorites(char favs[][64], int max_favs);
 void sonos_play_favorite(const char * name);
 void sonos_play_playlist(const char * name);
 void sonos_play_spotify(const char * uri);
+
+/* Tracks & Playlist playback */
+int  sonos_get_playlist_tracks(sonos_source_t src, const char * id_or_uri, sonos_track_t tracks[], int max_tracks);
+void sonos_play_playlist_track(const char * name_or_uri, int track_nr);
+void sonos_play_spotify_playlist_track(const char * playlist_uri, int track_nr, const char * track_uri);
+
+/* Spotify Music Search */
+int  sonos_spotify_search(const char * query, sonos_search_result_t * result);
 
 #endif

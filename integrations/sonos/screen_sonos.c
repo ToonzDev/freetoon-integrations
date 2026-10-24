@@ -34,6 +34,15 @@ static lv_obj_t * s_fav_list = NULL;
 static lv_obj_t * s_lbl_fav_msg = NULL;
 static lv_timer_t * s_refresh_timer = NULL;
 
+/* Forward declarations */
+static void open_playlist_tracks_view(const char * name, const char * id_or_uri, sonos_source_t src);
+static void close_playlist_tracks_view(void);
+static void populate_tracks_list(void);
+static void open_search_view(void);
+static void close_search_view(void);
+static void populate_search_results(void);
+static void on_search_click(lv_event_t * e);
+
 static bool s_pos_dragging = false;
 static int  s_art_last_ver = -1;
 static char     s_pending_name[64] = "";
@@ -48,6 +57,8 @@ static sonos_item_t        s_items[SONOS_MAX_ITEMS];
 static int                 s_item_count = 0;
 static volatile int        s_items_loading = 0;
 static volatile int        s_items_ready = 0;
+static volatile int        s_tracks_ready = 0;
+static volatile int        s_search_ready = 0;
 
 static void * items_loader_thread(void * arg) {
     (void)arg;
@@ -76,6 +87,8 @@ static void on_close_click(lv_event_t * e) {
         lv_timer_del(s_refresh_timer);
         s_refresh_timer = NULL;
     }
+    close_playlist_tracks_view();
+    close_search_view();
     sonos_stop();
     ui_pop();
     if (s_modal) {
@@ -216,19 +229,16 @@ static void on_item_click(lv_event_t * e) {
     if (idx < 0 || idx >= s_item_count) return;
     const sonos_item_t * it = &s_items[idx];
 
-    snprintf(s_pending_name, sizeof s_pending_name, "%s", it->name);
-    s_pending_until = now + 4000;
-
     if (s_cur_source == SONOS_SRC_FAVORITES) {
+        snprintf(s_pending_name, sizeof s_pending_name, "%s", it->name);
+        s_pending_until = now + 4000;
         sonos_play_favorite(it->name);
-    } else if (s_cur_source == SONOS_SRC_PLAYLISTS) {
-        sonos_play_playlist(it->uri[0] ? it->uri : it->name);
-    } else if (s_cur_source == SONOS_SRC_SPOTIFY) {
-        sonos_play_spotify(it->uri);
-    }
-    if (s_lbl_status) {
-        lv_label_set_text_fmt(s_lbl_status, "▶ %s...", it->name);
-        lv_obj_set_style_text_color(s_lbl_status, lv_color_hex(0x22cc66), 0);
+        if (s_lbl_status) {
+            lv_label_set_text_fmt(s_lbl_status, "▶ %s...", it->name);
+            lv_obj_set_style_text_color(s_lbl_status, lv_color_hex(0x22cc66), 0);
+        }
+    } else {
+        open_playlist_tracks_view(it->name, it->id[0] ? it->id : (it->uri[0] ? it->uri : it->name), s_cur_source);
     }
 }
 
@@ -295,6 +305,14 @@ static void sonos_modal_tick_cb(lv_timer_t * t) {
         s_items_ready = 0;
         if (s_lbl_fav_msg) lv_obj_add_flag(s_lbl_fav_msg, LV_OBJ_FLAG_HIDDEN);
         populate_items_list();
+    }
+    if (s_tracks_ready) {
+        s_tracks_ready = 0;
+        populate_tracks_list();
+    }
+    if (s_search_ready) {
+        s_search_ready = 0;
+        populate_search_results();
     }
 
     sonos_state_t st;
@@ -419,6 +437,580 @@ static void sonos_modal_tick_cb(lv_timer_t * t) {
     }
 }
 
+/* =========================================================================
+ * Playlist Tracks View
+ * ========================================================================= */
+static lv_obj_t * s_tracks_view = NULL;
+static lv_obj_t * s_tracks_list = NULL;
+static lv_obj_t * s_lbl_tracks_subtitle = NULL;
+static sonos_track_t s_tracks[SONOS_MAX_TRACKS];
+static int           s_track_count = 0;
+static volatile int  s_tracks_loading = 0;
+static char          s_cur_playlist_name[64] = "";
+static char          s_cur_playlist_id[128] = "";
+static sonos_source_t s_tracks_source = SONOS_SRC_PLAYLISTS;
+
+static void * tracks_loader_thread(void * arg) {
+    (void)arg;
+    int n = sonos_get_playlist_tracks(s_tracks_source, s_cur_playlist_id, s_tracks, SONOS_MAX_TRACKS);
+    s_track_count = n;
+    s_tracks_ready = 1;
+    s_tracks_loading = 0;
+    return NULL;
+}
+
+static void trigger_load_tracks(void) {
+    if (s_tracks_loading) return;
+    s_tracks_loading = 1;
+    s_tracks_ready = 0;
+    pthread_t tid;
+    if (pthread_create(&tid, NULL, tracks_loader_thread, NULL) == 0) {
+        pthread_detach(tid);
+    } else {
+        s_tracks_loading = 0;
+    }
+}
+
+static void close_playlist_tracks_view(void) {
+    if (s_tracks_view) {
+        lv_obj_del(s_tracks_view);
+        s_tracks_view = NULL;
+        s_tracks_list = NULL;
+        s_lbl_tracks_subtitle = NULL;
+    }
+}
+
+static void on_tracks_back_click(lv_event_t * e) {
+    (void)e;
+    close_playlist_tracks_view();
+}
+
+static void on_track_click(lv_event_t * e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (idx < 0 || idx >= s_track_count) return;
+    const sonos_track_t * trk = &s_tracks[idx];
+
+    snprintf(s_pending_name, sizeof s_pending_name, "%s", trk->title);
+    s_pending_until = lv_tick_get() + 4000;
+
+    if (s_tracks_source == SONOS_SRC_PLAYLISTS) {
+        sonos_play_playlist_track(s_cur_playlist_id, trk->track_nr);
+    } else {
+        sonos_play_spotify_playlist_track(s_cur_playlist_id, trk->track_nr, trk->uri);
+    }
+
+    if (s_lbl_status) {
+        lv_label_set_text_fmt(s_lbl_status, "▶ %s...", trk->title);
+        lv_obj_set_style_text_color(s_lbl_status, lv_color_hex(0x22cc66), 0);
+    }
+}
+
+static void on_tracks_play_all_click(lv_event_t * e) {
+    (void)e;
+    snprintf(s_pending_name, sizeof s_pending_name, "%s", s_cur_playlist_name);
+    s_pending_until = lv_tick_get() + 4000;
+
+    if (s_tracks_source == SONOS_SRC_PLAYLISTS) {
+        sonos_play_playlist_track(s_cur_playlist_id, 1);
+    } else {
+        sonos_play_spotify_playlist_track(s_cur_playlist_id, 1, "");
+    }
+
+    if (s_lbl_status) {
+        lv_label_set_text_fmt(s_lbl_status, "▶ %s...", s_cur_playlist_name);
+        lv_obj_set_style_text_color(s_lbl_status, lv_color_hex(0x22cc66), 0);
+    }
+}
+
+static void populate_tracks_list(void) {
+    if (!s_tracks_list || !s_tracks_view) return;
+    lv_obj_clean(s_tracks_list);
+
+    if (s_lbl_tracks_subtitle) {
+        if (s_track_count <= 0) {
+            lv_label_set_text(s_lbl_tracks_subtitle, tr("Geen nummers gevonden in deze afspeellijst", "No tracks found in this playlist"));
+        } else {
+            lv_label_set_text_fmt(s_lbl_tracks_subtitle, "%d %s", s_track_count, tr("nummers (tik om af te spelen)", "tracks (tap to play)"));
+        }
+    }
+
+    for (int i = 0; i < s_track_count; i++) {
+        lv_obj_t * btn = lv_btn_create(s_tracks_list);
+        lv_obj_set_size(btn, SX(450), SY(52));
+        lv_obj_set_style_bg_color(btn, lv_color_hex(THEME_ROW_BG), 0);
+        lv_obj_set_style_radius(btn, 10, 0);
+        lv_obj_set_style_pad_all(btn, SX(8), 0);
+        lv_obj_add_event_cb(btn, on_track_click, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
+        /* Track number badge */
+        lv_obj_t * nr_lbl = lv_label_create(btn);
+        lv_label_set_text_fmt(nr_lbl, "%d.", s_tracks[i].track_nr);
+        lv_obj_set_style_text_color(nr_lbl, lv_color_hex(THEME_ACCENT_BLUE), 0);
+        lv_obj_set_style_text_font(nr_lbl, SF(15), 0);
+        lv_obj_align(nr_lbl, LV_ALIGN_LEFT_MID, SX(2), 0);
+
+        /* Title & Artist label */
+        lv_obj_t * lbl = lv_label_create(btn);
+        if (s_tracks[i].artist[0]) {
+            lv_label_set_text_fmt(lbl, "%s  —  %s", s_tracks[i].title, s_tracks[i].artist);
+        } else {
+            lv_label_set_text(lbl, s_tracks[i].title);
+        }
+        lv_obj_set_style_text_color(lbl, lv_color_hex(THEME_TEXT_HI), 0);
+        lv_obj_set_style_text_font(lbl, SF(15), 0);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(lbl, SX(340));
+        lv_obj_align(lbl, LV_ALIGN_LEFT_MID, SX(32), 0);
+
+        /* Duration */
+        if (s_tracks[i].duration > 0) {
+            lv_obj_t * dur_lbl = lv_label_create(btn);
+            char d_buf[16];
+            format_time(s_tracks[i].duration, d_buf, sizeof d_buf);
+            lv_label_set_text(dur_lbl, d_buf);
+            lv_obj_set_style_text_color(dur_lbl, lv_color_hex(THEME_TEXT_DIM), 0);
+            lv_obj_set_style_text_font(dur_lbl, SF(13), 0);
+            lv_obj_align(dur_lbl, LV_ALIGN_RIGHT_MID, SX(-4), 0);
+        }
+    }
+}
+
+static void open_playlist_tracks_view(const char * name, const char * id_or_uri, sonos_source_t src) {
+    if (!s_modal) return;
+    close_playlist_tracks_view();
+
+    snprintf(s_cur_playlist_name, sizeof s_cur_playlist_name, "%s", name ? name : "");
+    snprintf(s_cur_playlist_id, sizeof s_cur_playlist_id, "%s", id_or_uri ? id_or_uri : "");
+    s_tracks_source = src;
+    s_track_count = 0;
+
+    s_tracks_view = lv_obj_create(s_modal);
+    lv_obj_set_size(s_tracks_view, SX(490), SY(510));
+    lv_obj_set_pos(s_tracks_view, SX(514), SY(74));
+    lv_obj_set_style_bg_color(s_tracks_view, lv_color_hex(THEME_CARD_BG), 0);
+    lv_obj_set_style_radius(s_tracks_view, 16, 0);
+    lv_obj_set_style_border_color(s_tracks_view, lv_color_hex(THEME_BORDER), 0);
+    lv_obj_set_style_border_width(s_tracks_view, settings.home_light_mode ? 1 : 0, 0);
+    lv_obj_set_style_pad_all(s_tracks_view, SX(14), 0);
+    lv_obj_clear_flag(s_tracks_view, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* Back button */
+    lv_obj_t * btn_back = lv_btn_create(s_tracks_view);
+    lv_obj_set_size(btn_back, SX(80), SY(44));
+    lv_obj_align(btn_back, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_set_style_bg_color(btn_back, lv_color_hex(THEME_BTN_BG), 0);
+    lv_obj_set_style_radius(btn_back, 8, 0);
+    lv_obj_add_event_cb(btn_back, on_tracks_back_click, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * bkl = lv_label_create(btn_back);
+    lv_label_set_text_fmt(bkl, "%s %s", LV_SYMBOL_LEFT, tr("Terug", "Back"));
+    lv_obj_set_style_text_color(bkl, lv_color_hex(THEME_TEXT_HI), 0);
+    lv_obj_set_style_text_font(bkl, SF(15), 0);
+    lv_obj_center(bkl);
+
+    /* Playlist title label */
+    lv_obj_t * lbl_title = lv_label_create(s_tracks_view);
+    lv_label_set_text(lbl_title, s_cur_playlist_name);
+    lv_obj_set_style_text_font(lbl_title, SF(18), 0);
+    lv_obj_set_style_text_color(lbl_title, lv_color_hex(THEME_TEXT_HI), 0);
+    lv_label_set_long_mode(lbl_title, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(lbl_title, SX(240));
+    lv_obj_align(lbl_title, LV_ALIGN_TOP_LEFT, SX(90), SY(10));
+
+    /* Play all button */
+    lv_obj_t * btn_all = lv_btn_create(s_tracks_view);
+    lv_obj_set_size(btn_all, SX(110), SY(44));
+    lv_obj_align(btn_all, LV_ALIGN_TOP_RIGHT, 0, 0);
+    lv_obj_set_style_bg_color(btn_all, lv_color_hex(settings.home_light_mode ? 0x2563eb : 0x2a5d96), 0);
+    lv_obj_set_style_radius(btn_all, 8, 0);
+    lv_obj_add_event_cb(btn_all, on_tracks_play_all_click, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * all_lbl = lv_label_create(btn_all);
+    lv_label_set_text_fmt(all_lbl, "%s %s", LV_SYMBOL_PLAY, tr("Alles", "Play all"));
+    lv_obj_set_style_text_color(all_lbl, lv_color_hex(0xffffff), 0);
+    lv_obj_set_style_text_font(all_lbl, SF(15), 0);
+    lv_obj_center(all_lbl);
+
+    /* Subtitle */
+    s_lbl_tracks_subtitle = lv_label_create(s_tracks_view);
+    lv_obj_set_style_text_font(s_lbl_tracks_subtitle, SF(14), 0);
+    lv_obj_set_style_text_color(s_lbl_tracks_subtitle, lv_color_hex(THEME_TEXT_DIM), 0);
+    lv_label_set_text(s_lbl_tracks_subtitle, tr("Nummers ophalen...", "Fetching tracks..."));
+    lv_obj_align(s_lbl_tracks_subtitle, LV_ALIGN_TOP_LEFT, SX(6), SY(52));
+
+    /* Tracks list container */
+    s_tracks_list = lv_obj_create(s_tracks_view);
+    lv_obj_set_size(s_tracks_list, SX(466), SY(418));
+    lv_obj_set_pos(s_tracks_list, 0, SY(74));
+    lv_obj_set_style_bg_opa(s_tracks_list, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_tracks_list, 0, 0);
+    lv_obj_set_style_pad_all(s_tracks_list, 0, 0);
+    lv_obj_set_style_pad_row(s_tracks_list, 6, 0);
+    lv_obj_add_flag(s_tracks_list, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(s_tracks_list, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(s_tracks_list, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_flex_flow(s_tracks_list, LV_FLEX_FLOW_COLUMN);
+
+    trigger_load_tracks();
+}
+
+/* =========================================================================
+ * Spotify Music Search View
+ * ========================================================================= */
+static lv_obj_t * s_search_modal = NULL;
+static lv_obj_t * s_ta_search = NULL;
+static lv_obj_t * s_kb_search = NULL;
+static lv_obj_t * s_search_list = NULL;
+static lv_obj_t * s_btn_cat_tracks = NULL;
+static lv_obj_t * s_btn_cat_albums = NULL;
+static lv_obj_t * s_btn_cat_playlists = NULL;
+static lv_obj_t * s_lbl_search_msg = NULL;
+static sonos_search_result_t s_search_res = {0};
+static sonos_search_type_t   s_search_cat = SONOS_SEARCH_TRACKS;
+static volatile int          s_search_loading = 0;
+static char                  s_last_query[128] = "";
+
+static void close_search_view(void) {
+    if (s_search_modal) {
+        lv_obj_del(s_search_modal);
+        s_search_modal = NULL;
+        s_ta_search = NULL;
+        s_kb_search = NULL;
+        s_search_list = NULL;
+        s_btn_cat_tracks = NULL;
+        s_btn_cat_albums = NULL;
+        s_btn_cat_playlists = NULL;
+        s_lbl_search_msg = NULL;
+    }
+}
+
+static void on_search_close_click(lv_event_t * e) {
+    (void)e;
+    close_search_view();
+}
+
+static void * search_loader_thread(void * arg) {
+    (void)arg;
+    sonos_spotify_search(s_last_query, &s_search_res);
+    s_search_ready = 1;
+    s_search_loading = 0;
+    return NULL;
+}
+
+static void trigger_spotify_search(const char * q) {
+    if (!q || !q[0] || s_search_loading) return;
+    snprintf(s_last_query, sizeof s_last_query, "%s", q);
+    s_search_loading = 1;
+    s_search_ready = 0;
+    if (s_lbl_search_msg) {
+        lv_label_set_text_fmt(s_lbl_search_msg, "%s '%s'...", tr("Zoeken naar", "Searching for"), q);
+    }
+    if (s_kb_search) {
+        lv_obj_add_flag(s_kb_search, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_search_list) {
+        lv_obj_set_height(s_search_list, SY(440));
+    }
+    pthread_t tid;
+    if (pthread_create(&tid, NULL, search_loader_thread, NULL) == 0) {
+        pthread_detach(tid);
+    } else {
+        s_search_loading = 0;
+    }
+}
+
+static void on_search_go_click(lv_event_t * e) {
+    (void)e;
+    if (!s_ta_search) return;
+    const char * txt = lv_textarea_get_text(s_ta_search);
+    if (txt && txt[0]) trigger_spotify_search(txt);
+}
+
+static void on_search_kb_event(lv_event_t * e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_READY) {
+        on_search_go_click(NULL);
+    } else if (code == LV_EVENT_CANCEL) {
+        if (s_kb_search) lv_obj_add_flag(s_kb_search, LV_OBJ_FLAG_HIDDEN);
+        if (s_search_list) lv_obj_set_height(s_search_list, SY(440));
+    }
+}
+
+static void on_ta_search_click(lv_event_t * e) {
+    (void)e;
+    if (s_kb_search) {
+        lv_obj_clear_flag(s_kb_search, LV_OBJ_FLAG_HIDDEN);
+        if (s_search_list) lv_obj_set_height(s_search_list, SY(220));
+    }
+}
+
+static void update_cat_buttons_style(void) {
+    if (s_btn_cat_tracks)
+        lv_obj_set_style_bg_color(s_btn_cat_tracks, lv_color_hex(s_search_cat == SONOS_SEARCH_TRACKS ? THEME_ACCENT_BLUE : THEME_BTN_BG), 0);
+    if (s_btn_cat_albums)
+        lv_obj_set_style_bg_color(s_btn_cat_albums, lv_color_hex(s_search_cat == SONOS_SEARCH_ALBUMS ? THEME_ACCENT_BLUE : THEME_BTN_BG), 0);
+    if (s_btn_cat_playlists)
+        lv_obj_set_style_bg_color(s_btn_cat_playlists, lv_color_hex(s_search_cat == SONOS_SEARCH_PLAYLISTS ? THEME_ACCENT_BLUE : THEME_BTN_BG), 0);
+}
+
+static void on_cat_click(lv_event_t * e) {
+    int cat = (int)(intptr_t)lv_event_get_user_data(e);
+    s_search_cat = (sonos_search_type_t)cat;
+    update_cat_buttons_style();
+    populate_search_results();
+}
+
+static void on_search_result_item_click(lv_event_t * e) {
+    int idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (s_search_cat == SONOS_SEARCH_TRACKS) {
+        if (idx < 0 || idx >= s_search_res.track_count) return;
+        const sonos_search_item_t * item = &s_search_res.tracks[idx];
+        snprintf(s_pending_name, sizeof s_pending_name, "%s", item->name);
+        s_pending_until = lv_tick_get() + 4000;
+        sonos_play_spotify(item->uri);
+        if (s_lbl_status) {
+            lv_label_set_text_fmt(s_lbl_status, "▶ %s...", item->name);
+            lv_obj_set_style_text_color(s_lbl_status, lv_color_hex(0x22cc66), 0);
+        }
+        close_search_view();
+    } else if (s_search_cat == SONOS_SEARCH_ALBUMS) {
+        if (idx < 0 || idx >= s_search_res.album_count) return;
+        const sonos_search_item_t * item = &s_search_res.albums[idx];
+        snprintf(s_pending_name, sizeof s_pending_name, "%s", item->name);
+        s_pending_until = lv_tick_get() + 4000;
+        sonos_play_spotify(item->uri);
+        if (s_lbl_status) {
+            lv_label_set_text_fmt(s_lbl_status, "▶ %s...", item->name);
+            lv_obj_set_style_text_color(s_lbl_status, lv_color_hex(0x22cc66), 0);
+        }
+        close_search_view();
+    } else if (s_search_cat == SONOS_SEARCH_PLAYLISTS) {
+        if (idx < 0 || idx >= s_search_res.playlist_count) return;
+        const sonos_search_item_t * item = &s_search_res.playlists[idx];
+        char pl_name[96], pl_uri[128];
+        snprintf(pl_name, sizeof pl_name, "%s", item->name);
+        snprintf(pl_uri, sizeof pl_uri, "%s", item->uri);
+        close_search_view();
+        open_playlist_tracks_view(pl_name, pl_uri, SONOS_SRC_SPOTIFY);
+    }
+}
+
+static void populate_search_results(void) {
+    if (!s_search_list || !s_search_modal) return;
+    lv_obj_clean(s_search_list);
+
+    if (s_btn_cat_tracks) {
+        lv_obj_t * l = lv_obj_get_child(s_btn_cat_tracks, 0);
+        if (l) lv_label_set_text_fmt(l, "%s (%d)", tr("Nummers", "Tracks"), s_search_res.track_count);
+    }
+    if (s_btn_cat_albums) {
+        lv_obj_t * l = lv_obj_get_child(s_btn_cat_albums, 0);
+        if (l) lv_label_set_text_fmt(l, "%s (%d)", tr("Albums", "Albums"), s_search_res.album_count);
+    }
+    if (s_btn_cat_playlists) {
+        lv_obj_t * l = lv_obj_get_child(s_btn_cat_playlists, 0);
+        if (l) lv_label_set_text_fmt(l, "%s (%d)", tr("Playlists", "Playlists"), s_search_res.playlist_count);
+    }
+
+    int count = 0;
+    if (s_search_cat == SONOS_SEARCH_TRACKS) count = s_search_res.track_count;
+    else if (s_search_cat == SONOS_SEARCH_ALBUMS) count = s_search_res.album_count;
+    else count = s_search_res.playlist_count;
+
+    if (s_lbl_search_msg) {
+        if (count == 0) {
+            lv_label_set_text(s_lbl_search_msg, tr("Geen resultaten gevonden in deze categorie", "No results found in this category"));
+        } else {
+            lv_label_set_text_fmt(s_lbl_search_msg, "%d %s", count, tr("resultaten gevonden", "results found"));
+        }
+    }
+
+    for (int i = 0; i < count; i++) {
+        lv_obj_t * btn = lv_btn_create(s_search_list);
+        lv_obj_set_size(btn, SX(940), SY(52));
+        lv_obj_set_style_bg_color(btn, lv_color_hex(THEME_ROW_BG), 0);
+        lv_obj_set_style_radius(btn, 10, 0);
+        lv_obj_set_style_pad_all(btn, SX(10), 0);
+        lv_obj_add_event_cb(btn, on_search_result_item_click, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
+        const char * sym = LV_SYMBOL_PLAY;
+        const char * name = "";
+        const char * artist = "";
+        int dur = 0;
+
+        if (s_search_cat == SONOS_SEARCH_TRACKS) {
+            sym = LV_SYMBOL_PLAY;
+            name = s_search_res.tracks[i].name;
+            artist = s_search_res.tracks[i].artist;
+            dur = s_search_res.tracks[i].duration;
+        } else if (s_search_cat == SONOS_SEARCH_ALBUMS) {
+            sym = LV_SYMBOL_AUDIO;
+            name = s_search_res.albums[i].name;
+            artist = s_search_res.albums[i].artist;
+        } else {
+            sym = LV_SYMBOL_LIST;
+            name = s_search_res.playlists[i].name;
+            artist = s_search_res.playlists[i].artist;
+        }
+
+        lv_obj_t * ico = lv_label_create(btn);
+        lv_label_set_text(ico, sym);
+        lv_obj_set_style_text_color(ico, lv_color_hex(0x22cc66), 0);
+        lv_obj_set_style_text_font(ico, SF(18), 0);
+        lv_obj_align(ico, LV_ALIGN_LEFT_MID, SX(4), 0);
+
+        lv_obj_t * lbl = lv_label_create(btn);
+        if (artist && artist[0]) {
+            lv_label_set_text_fmt(lbl, "%s  —  %s", name, artist);
+        } else {
+            lv_label_set_text(lbl, name);
+        }
+        lv_obj_set_style_text_color(lbl, lv_color_hex(THEME_TEXT_HI), 0);
+        lv_obj_set_style_text_font(lbl, SF(16), 0);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(lbl, SX(780));
+        lv_obj_align(lbl, LV_ALIGN_LEFT_MID, SX(36), 0);
+
+        if (dur > 0) {
+            lv_obj_t * dur_lbl = lv_label_create(btn);
+            char d_buf[16];
+            format_time(dur, d_buf, sizeof d_buf);
+            lv_label_set_text(dur_lbl, d_buf);
+            lv_obj_set_style_text_color(dur_lbl, lv_color_hex(THEME_TEXT_DIM), 0);
+            lv_obj_set_style_text_font(dur_lbl, SF(14), 0);
+            lv_obj_align(dur_lbl, LV_ALIGN_RIGHT_MID, SX(-4), 0);
+        }
+    }
+}
+
+static void open_search_view(void) {
+    if (s_search_modal) return;
+
+    s_search_modal = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(s_search_modal, LV_HOR_RES, LV_VER_RES);
+    lv_obj_set_pos(s_search_modal, 0, 0);
+    lv_obj_set_style_bg_color(s_search_modal, lv_color_hex(THEME_BG), 0);
+    lv_obj_set_style_border_width(s_search_modal, 0, 0);
+    lv_obj_set_style_radius(s_search_modal, 0, 0);
+    lv_obj_set_style_pad_all(s_search_modal, 0, 0);
+    lv_obj_clear_flag(s_search_modal, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* Header */
+    int cb_w = (DISP_HOR < 1000) ? 68 : 76;
+    int cb_h = (DISP_VER < 600) ? 46 : 52;
+    lv_obj_t * b_close = lv_btn_create(s_search_modal);
+    lv_obj_set_size(b_close, cb_w, cb_h);
+    lv_obj_align(b_close, LV_ALIGN_TOP_RIGHT, SX(-12), SY(8));
+    lv_obj_set_style_bg_color(b_close, lv_color_hex(THEME_BTN_BG), 0);
+    lv_obj_set_style_radius(b_close, 10, 0);
+    lv_obj_add_event_cb(b_close, on_search_close_click, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * cl = lv_label_create(b_close);
+    lv_label_set_text(cl, LV_SYMBOL_CLOSE);
+    lv_obj_set_style_text_font(cl, SF(22), 0);
+    lv_obj_set_style_text_color(cl, lv_color_hex(THEME_TEXT_HI), 0);
+    lv_obj_center(cl);
+
+    lv_obj_t * title = lv_label_create(s_search_modal);
+    lv_obj_set_style_text_color(title, lv_color_hex(THEME_TEXT_HI), 0);
+    lv_obj_set_style_text_font(title, SF(24), 0);
+    lv_label_set_text_fmt(title, "%s Spotify", tr("Zoeken in", "Search in"));
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, SX(20), SY(14));
+
+    /* Search input row */
+    s_ta_search = lv_textarea_create(s_search_modal);
+    lv_obj_set_size(s_ta_search, SX(560), SY(46));
+    lv_obj_set_pos(s_ta_search, SX(20), SY(60));
+    lv_textarea_set_placeholder_text(s_ta_search, tr("Typ artiest, nummer of album...", "Type artist, song or album..."));
+    lv_textarea_set_one_line(s_ta_search, true);
+    lv_obj_set_style_text_font(s_ta_search, SF(16), 0);
+    lv_obj_set_style_bg_color(s_ta_search, lv_color_hex(THEME_CARD_BG), 0);
+    lv_obj_set_style_text_color(s_ta_search, lv_color_hex(THEME_TEXT_HI), 0);
+    lv_obj_set_style_border_color(s_ta_search, lv_color_hex(THEME_BORDER), 0);
+    lv_obj_add_event_cb(s_ta_search, on_ta_search_click, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t * btn_go = lv_btn_create(s_search_modal);
+    lv_obj_set_size(btn_go, SX(110), SY(46));
+    lv_obj_set_pos(btn_go, SX(590), SY(60));
+    lv_obj_set_style_bg_color(btn_go, lv_color_hex(0x22cc66), 0);
+    lv_obj_set_style_radius(btn_go, 10, 0);
+    lv_obj_add_event_cb(btn_go, on_search_go_click, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * gol = lv_label_create(btn_go);
+    lv_label_set_text(gol, tr("Zoek", "Search"));
+    lv_obj_set_style_text_color(gol, lv_color_hex(0xffffff), 0);
+    lv_obj_set_style_text_font(gol, SF(16), 0);
+    lv_obj_center(gol);
+
+    /* Category Buttons row */
+    int cat_w = SX(125);
+    int cat_h = SY(38);
+    int cat_y = SY(116);
+    int cat_x = SX(20);
+
+    s_btn_cat_tracks = lv_btn_create(s_search_modal);
+    lv_obj_set_size(s_btn_cat_tracks, cat_w, cat_h);
+    lv_obj_set_pos(s_btn_cat_tracks, cat_x, cat_y);
+    lv_obj_set_style_radius(s_btn_cat_tracks, 8, 0);
+    lv_obj_add_event_cb(s_btn_cat_tracks, on_cat_click, LV_EVENT_CLICKED, (void *)(intptr_t)SONOS_SEARCH_TRACKS);
+    lv_obj_t * ctl1 = lv_label_create(s_btn_cat_tracks);
+    lv_label_set_text_fmt(ctl1, "%s (%d)", tr("Nummers", "Tracks"), 0);
+    lv_obj_set_style_text_font(ctl1, SF(14), 0);
+    lv_obj_center(ctl1);
+    cat_x += cat_w + SX(10);
+
+    s_btn_cat_albums = lv_btn_create(s_search_modal);
+    lv_obj_set_size(s_btn_cat_albums, cat_w, cat_h);
+    lv_obj_set_pos(s_btn_cat_albums, cat_x, cat_y);
+    lv_obj_set_style_radius(s_btn_cat_albums, 8, 0);
+    lv_obj_add_event_cb(s_btn_cat_albums, on_cat_click, LV_EVENT_CLICKED, (void *)(intptr_t)SONOS_SEARCH_ALBUMS);
+    lv_obj_t * ctl2 = lv_label_create(s_btn_cat_albums);
+    lv_label_set_text_fmt(ctl2, "%s (%d)", tr("Albums", "Albums"), 0);
+    lv_obj_set_style_text_font(ctl2, SF(14), 0);
+    lv_obj_center(ctl2);
+    cat_x += cat_w + SX(10);
+
+    s_btn_cat_playlists = lv_btn_create(s_search_modal);
+    lv_obj_set_size(s_btn_cat_playlists, cat_w, cat_h);
+    lv_obj_set_pos(s_btn_cat_playlists, cat_x, cat_y);
+    lv_obj_set_style_radius(s_btn_cat_playlists, 8, 0);
+    lv_obj_add_event_cb(s_btn_cat_playlists, on_cat_click, LV_EVENT_CLICKED, (void *)(intptr_t)SONOS_SEARCH_PLAYLISTS);
+    lv_obj_t * ctl3 = lv_label_create(s_btn_cat_playlists);
+    lv_label_set_text_fmt(ctl3, "%s (%d)", tr("Playlists", "Playlists"), 0);
+    lv_obj_set_style_text_font(ctl3, SF(14), 0);
+    lv_obj_center(ctl3);
+    cat_x += cat_w + SX(16);
+
+    s_lbl_search_msg = lv_label_create(s_search_modal);
+    lv_obj_set_style_text_font(s_lbl_search_msg, SF(14), 0);
+    lv_obj_set_style_text_color(s_lbl_search_msg, lv_color_hex(THEME_TEXT_DIM), 0);
+    lv_label_set_text(s_lbl_search_msg, tr("Typ een zoekterm en druk op Zoek", "Type a search term and press Search"));
+    lv_obj_set_pos(s_lbl_search_msg, cat_x, cat_y + SY(8));
+
+    update_cat_buttons_style();
+
+    /* Results list */
+    s_search_list = lv_obj_create(s_search_modal);
+    lv_obj_set_size(s_search_list, SX(984), SY(220));
+    lv_obj_set_pos(s_search_list, SX(20), SY(164));
+    lv_obj_set_style_bg_opa(s_search_list, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(s_search_list, 0, 0);
+    lv_obj_set_style_pad_all(s_search_list, 0, 0);
+    lv_obj_set_style_pad_row(s_search_list, 6, 0);
+    lv_obj_add_flag(s_search_list, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(s_search_list, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(s_search_list, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_flex_flow(s_search_list, LV_FLEX_FLOW_COLUMN);
+
+    /* Virtual Keyboard */
+    s_kb_search = lv_keyboard_create(s_search_modal);
+    lv_obj_set_size(s_kb_search, LV_HOR_RES, SY(210));
+    lv_obj_align(s_kb_search, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_keyboard_set_textarea(s_kb_search, s_ta_search);
+    lv_obj_add_event_cb(s_kb_search, on_search_kb_event, LV_EVENT_ALL, NULL);
+}
+
+static void on_search_click(lv_event_t * e) {
+    (void)e;
+    open_search_view();
+}
+
 lv_obj_t * screen_create(void) {
     if (s_modal) lv_obj_del(s_modal);
 
@@ -497,6 +1089,22 @@ lv_obj_t * screen_create(void) {
     lv_obj_set_style_text_font(sl, SF(22), 0);
     lv_obj_set_style_text_color(sl, lv_color_hex(THEME_TEXT_HI), 0);
     lv_obj_center(sl);
+
+    /* Search button (if Spotify configured) */
+    if (s_spot_cfg.configured || s_spot_cfg.user_count > 0) {
+        lv_obj_t * b_search = lv_btn_create(s_modal);
+        lv_obj_set_size(b_search, cb_w, cb_h);
+        lv_obj_align(b_search, LV_ALIGN_TOP_RIGHT, SX(-12) - 2 * (cb_w + SX(10)), SY(8));
+        lv_obj_set_style_bg_color(b_search, lv_color_hex(THEME_BTN_BG), 0);
+        lv_obj_set_style_radius(b_search, 10, 0);
+        lv_obj_set_ext_click_area(b_search, 25);
+        lv_obj_add_event_cb(b_search, on_search_click, LV_EVENT_CLICKED, NULL);
+        lv_obj_t * sch = lv_label_create(b_search);
+        lv_label_set_text(sch, tr("Zoek", "Search"));
+        lv_obj_set_style_text_font(sch, SF(17), 0);
+        lv_obj_set_style_text_color(sch, lv_color_hex(0x22cc66), 0);
+        lv_obj_center(sch);
+    }
 
     /* --- Left Card: Now Playing --- */
     lv_obj_t * card_left = lv_obj_create(s_modal);
