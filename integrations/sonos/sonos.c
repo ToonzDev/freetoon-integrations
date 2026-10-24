@@ -2172,6 +2172,7 @@ static int parse_spotify_playlists(const char * json, sonos_item_t items[], int 
             sonos_sanitize_utf8(name);
             snprintf(items[count].name, sizeof items[count].name, "%s", name);
             snprintf(items[count].uri, sizeof items[count].uri, "%s", uri);
+            items[count].id[0] = 0;
             count++;
         }
         cur = q + 1;
@@ -2181,6 +2182,7 @@ static int parse_spotify_playlists(const char * json, sonos_item_t items[], int 
 
 int sonos_get_source_items(sonos_source_t src, int spotify_user_idx, sonos_item_t items[], int max_items) {
     if (!items || max_items <= 0) return 0;
+    memset(items, 0, sizeof(sonos_item_t) * max_items);
     if (src == SONOS_SRC_FAVORITES) {
         char favs[SONOS_MAX_ITEMS][64];
         int n = sonos_get_favorites(favs, max_items);
