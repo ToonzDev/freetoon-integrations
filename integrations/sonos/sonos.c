@@ -2300,6 +2300,62 @@ static int get_sonos_playlist_tracks(const char * obj_id, sonos_track_t tracks[]
     return count;
 }
 
+static int parse_spotify_track_item(const char * item_str, const char * item_end, sonos_track_t * trk) {
+    if (!item_str || !trk) return 0;
+
+    /* 1. Track URI: must be a real playable spotify:track: within this item */
+    const char * p_uri = strstr(item_str, "spotify:track:");
+    if (!p_uri || (item_end && p_uri >= item_end)) return 0;
+
+    const char * u_end = p_uri;
+    while (*u_end && *u_end != '"' && *u_end != ' ' && *u_end != '\n' && *u_end != '\r' &&
+           (size_t)(u_end - p_uri) < sizeof(trk->uri) - 1) {
+        u_end++;
+    }
+    size_t u_len = u_end - p_uri;
+    memcpy(trk->uri, p_uri, u_len);
+    trk->uri[u_len] = '\0';
+
+    /* 2. Artist name: look inside "artists": [ { "name": "..." } ] */
+    const char * p_art = strstr(item_str, "\"artists\":");
+    if (p_art && (!item_end || p_art < item_end)) {
+        extract_json_str(p_art, "name", trk->artist, sizeof(trk->artist));
+    } else {
+        trk->artist[0] = '\0';
+    }
+
+    /* 3. Album name: look inside "album": { "name": "..." } */
+    const char * p_alb = strstr(item_str, "\"album\":");
+    if (p_alb && (!item_end || p_alb < item_end)) {
+        extract_json_str(p_alb, "name", trk->album, sizeof(trk->album));
+    } else {
+        trk->album[0] = '\0';
+    }
+
+    /* 4. Duration */
+    int dur_ms = 0;
+    const char * p_dur = strstr(item_str, "\"duration_ms\":");
+    if (p_dur && (!item_end || p_dur < item_end)) {
+        extract_json_int(p_dur, "duration_ms", &dur_ms);
+    }
+    trk->duration = dur_ms / 1000;
+
+    /* 5. Track title: The track's own "name" key is at the root of the track object,
+     * AFTER the "artists": [ ... ] block (which avoids matching album artist or album title). */
+    const char * search_name = item_str;
+    if (p_art) {
+        const char * art_close = strchr(p_art, ']');
+        if (art_close && (!item_end || art_close < item_end)) {
+            search_name = art_close;
+        }
+    }
+    if (!extract_json_str(search_name, "name", trk->title, sizeof(trk->title)) || !trk->title[0]) {
+        extract_json_str(item_str, "name", trk->title, sizeof(trk->title));
+    }
+
+    return (trk->title[0] && trk->uri[0]) ? 1 : 0;
+}
+
 static int get_spotify_playlist_tracks(const char * uri, sonos_track_t tracks[], int max_tracks) {
     if (!uri || !uri[0] || max_tracks <= 0) return 0;
     sonos_spotify_cfg_t cfg;
@@ -2313,18 +2369,22 @@ static int get_spotify_playlist_tracks(const char * uri, sonos_track_t tracks[],
     if (strncmp(id, "spotify:playlist:", 17) == 0) id += 17;
     else if (strstr(id, ":playlist:")) id = strstr(id, ":playlist:") + 10;
 
-    char cmd[512];
+    int req_limit = max_tracks > 100 ? 100 : max_tracks;
+    if (req_limit < 50) req_limit = 50;
+
+    char cmd[700];
     snprintf(cmd, sizeof cmd,
-        "/usr/bin/curl -s -4 -k --max-time 8 --connect-timeout 4 "
+        "/usr/bin/curl -s -4 -k --max-time 10 --connect-timeout 4 "
         "-H 'Authorization: Bearer %s' "
-        "'https://api.spotify.com/v1/playlists/%s/tracks?limit=%d'",
-        token, id, max_tracks > 50 ? 50 : max_tracks);
+        "'https://api.spotify.com/v1/playlists/%s/tracks?limit=%d&fields=items(track(name,uri,duration_ms,artists(name),album(name)))'",
+        token, id, req_limit);
 
     FILE * fp = popen(cmd, "r");
     if (!fp) return 0;
-    char * resp = malloc(65536);
+    size_t bufsz = 131072; /* 128 KB */
+    char * resp = malloc(bufsz);
     if (!resp) { pclose(fp); return 0; }
-    size_t got = fread(resp, 1, 65535, fp);
+    size_t got = fread(resp, 1, bufsz - 1, fp);
     pclose(fp);
     resp[got] = 0;
 
@@ -2332,32 +2392,19 @@ static int get_spotify_playlist_tracks(const char * uri, sonos_track_t tracks[],
     const char * cur = resp;
     while ((cur = strstr(cur, "\"track\":")) != NULL && count < max_tracks) {
         cur += 8;
+        while (*cur == ' ' || *cur == '\t' || *cur == '\n' || *cur == '\r') cur++;
+        if (strncmp(cur, "null", 4) == 0) {
+            cur += 4;
+            continue;
+        }
+
         const char * next_item = strstr(cur, "\"track\":");
 
-        char tname[96] = "", aname[64] = "", albname[64] = "", turi[128] = "";
-        int dur_ms = 0;
-
-        extract_json_str(cur, "name", tname, sizeof tname);
-        extract_json_str(cur, "uri", turi, sizeof turi);
-        extract_json_int(cur, "duration_ms", &dur_ms);
-
-        const char * art = strstr(cur, "\"artists\":");
-        if (art && (!next_item || art < next_item)) {
-            extract_json_str(art, "name", aname, sizeof aname);
-        }
-        const char * alb = strstr(cur, "\"album\":");
-        if (alb && (!next_item || alb < next_item)) {
-            extract_json_str(alb, "name", albname, sizeof albname);
-        }
-
-        if (tname[0]) {
-            snprintf(tracks[count].title, sizeof tracks[0].title, "%s", tname);
-            snprintf(tracks[count].artist, sizeof tracks[0].artist, "%s", aname);
-            snprintf(tracks[count].album, sizeof tracks[0].album, "%s", albname);
-            snprintf(tracks[count].uri, sizeof tracks[0].uri, "%s", turi);
-            tracks[count].duration = dur_ms / 1000;
-            tracks[count].track_nr = count + 1;
-            count++;
+        sonos_track_t trk;
+        memset(&trk, 0, sizeof trk);
+        if (parse_spotify_track_item(cur, next_item, &trk)) {
+            trk.track_nr = count + 1;
+            tracks[count++] = trk;
         }
     }
     free(resp);
