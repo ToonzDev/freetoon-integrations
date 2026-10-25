@@ -43,6 +43,8 @@ static void open_search_view(void);
 static void close_search_view(void);
 static void populate_search_results(void);
 static void on_search_click(lv_event_t * e);
+static void sonos_save_ui_state(void);
+static void sonos_load_ui_state(void);
 
 static bool s_pos_dragging = false;
 static int  s_art_last_ver = -1;
@@ -87,7 +89,7 @@ static void trigger_load_items(void) {
     }
 }
 
-static void on_close_click(lv_event_t * e) {
+static void on_modal_deleted(lv_event_t * e) {
     (void)e;
     if (s_refresh_timer) {
         lv_timer_del(s_refresh_timer);
@@ -95,13 +97,7 @@ static void on_close_click(lv_event_t * e) {
     }
     close_playlist_tracks_view();
     close_search_view();
-    sonos_stop();
-    ui_pop();
-    if (s_modal) {
-        lv_obj_t * m = s_modal;
-        s_modal = NULL;
-        lv_obj_del(m);
-    }
+    s_modal = NULL;
     s_art_box = NULL;
     s_img_art = NULL;
     s_slider_pos = NULL;
@@ -124,6 +120,13 @@ static void on_close_click(lv_event_t * e) {
     s_zone_probing = 0;
     s_zone_probe_ready = 0;
     s_zone_msg_until = 0;
+    sonos_stop();
+}
+
+static void on_close_click(lv_event_t * e) {
+    (void)e;
+    sonos_save_ui_state();
+    ui_pop();
 }
 
 static void * zone_probe_thread(void * arg) {
@@ -238,6 +241,7 @@ static void on_source_change(lv_event_t * e) {
         lv_label_set_text(s_lbl_fav_msg, tr("Laden...", "Loading..."));
         lv_obj_clear_flag(s_lbl_fav_msg, LV_OBJ_FLAG_HIDDEN);
     }
+    sonos_save_ui_state();
     trigger_load_items();
 }
 
@@ -272,6 +276,7 @@ static void on_fav_refresh_click(lv_event_t * e) {
         lv_label_set_text(s_lbl_fav_msg, tr("Laden...", "Loading..."));
         lv_obj_clear_flag(s_lbl_fav_msg, LV_OBJ_FLAG_HIDDEN);
     }
+    sonos_save_ui_state();
     trigger_load_items();
 }
 
@@ -382,7 +387,7 @@ static void sonos_modal_tick_cb(lv_timer_t * t) {
 
     if (!st.connected) {
         if (s_lbl_status) {
-            lv_label_set_text(s_lbl_status, tr("⚠ Zoeken naar Sonos...", "⚠ Searching for Sonos..."));
+            lv_label_set_text(s_lbl_status, tr(LV_SYMBOL_WARNING " Zoeken naar Sonos...", LV_SYMBOL_WARNING " Searching for Sonos..."));
             lv_obj_set_style_text_color(s_lbl_status, lv_color_hex(0xff4444), 0);
         }
         if (s_lbl_title) lv_label_set_text(s_lbl_title, tr("Controleer of speakers aanstaan", "Check if speakers are turned on"));
@@ -516,6 +521,50 @@ static char          s_cur_playlist_name[64] = "";
 static char          s_cur_playlist_id[128] = "";
 static sonos_source_t s_tracks_source = SONOS_SRC_PLAYLISTS;
 
+static void sonos_save_ui_state(void) {
+    FILE * f = fopen("/tmp/sonos_ui_state.json", "w");
+    if (!f) return;
+    fprintf(f, "{\"source\":%d,\"spot_user\":%d,\"in_pl\":%d,\"pl_name\":\"%s\",\"pl_id\":\"%s\",\"pl_src\":%d}\n",
+            (int)s_cur_source, s_cur_spot_user, s_tracks_view ? 1 : 0,
+            s_cur_playlist_name, s_cur_playlist_id, (int)s_tracks_source);
+    fclose(f);
+}
+
+static int s_restore_pl = 0;
+static void sonos_load_ui_state(void) {
+    FILE * f = fopen("/tmp/sonos_ui_state.json", "r");
+    if (!f) return;
+    char buf[512] = "";
+    if (fgets(buf, sizeof buf, f)) {
+        int src = 0, spot = 0, in_pl = 0, pl_src = 0;
+        char name[128] = "", id[128] = "";
+        char * p;
+        if ((p = strstr(buf, "\"source\":"))) src = atoi(p + 9);
+        if ((p = strstr(buf, "\"spot_user\":"))) spot = atoi(p + 12);
+        if ((p = strstr(buf, "\"in_pl\":"))) in_pl = atoi(p + 8);
+        if ((p = strstr(buf, "\"pl_src\":"))) pl_src = atoi(p + 9);
+        if ((p = strstr(buf, "\"pl_name\":\""))) {
+            char * end = strchr(p + 11, '"');
+            if (end) { size_t n = end - (p + 11); if (n < sizeof name) { memcpy(name, p + 11, n); name[n] = 0; } }
+        }
+        if ((p = strstr(buf, "\"pl_id\":\""))) {
+            char * end = strchr(p + 9, '"');
+            if (end) { size_t n = end - (p + 9); if (n < sizeof id) { memcpy(id, p + 9, n); id[n] = 0; } }
+        }
+        s_cur_source = (sonos_source_t)src;
+        s_cur_spot_user = spot;
+        if (in_pl && name[0] && id[0]) {
+            snprintf(s_cur_playlist_name, sizeof s_cur_playlist_name, "%s", name);
+            snprintf(s_cur_playlist_id, sizeof s_cur_playlist_id, "%s", id);
+            s_tracks_source = (sonos_source_t)pl_src;
+            s_restore_pl = 1;
+        } else {
+            s_restore_pl = 0;
+        }
+    }
+    fclose(f);
+}
+
 static void * tracks_loader_thread(void * arg) {
     (void)arg;
     int n = sonos_get_playlist_tracks(s_tracks_source, s_cur_playlist_id, s_tracks, SONOS_MAX_TRACKS);
@@ -547,6 +596,7 @@ static void close_playlist_tracks_view(void) {
     s_track_count = 0;
     s_cur_playlist_name[0] = '\0';
     s_cur_playlist_id[0] = '\0';
+    sonos_save_ui_state();
 }
 
 static void on_tracks_back_click(lv_event_t * e) {
@@ -722,6 +772,7 @@ static void open_playlist_tracks_view(const char * name, const char * id_or_uri,
     lv_obj_set_flex_flow(s_tracks_list, LV_FLEX_FLOW_COLUMN);
 
     trigger_load_tracks();
+    sonos_save_ui_state();
 }
 
 /* =========================================================================
@@ -1107,10 +1158,12 @@ lv_obj_t * screen_create(void) {
     if (s_modal) lv_obj_del(s_modal);
 
     s_art_last_ver = -1;
+    sonos_load_ui_state();
     sonos_start();
     sonos_get_spotify_config(&s_spot_cfg);
 
     s_modal = lv_obj_create(NULL);
+    lv_obj_add_event_cb(s_modal, on_modal_deleted, LV_EVENT_DELETE, NULL);
     lv_obj_set_size(s_modal, LV_HOR_RES, LV_VER_RES);
     lv_obj_set_pos(s_modal, 0, 0);
     lv_obj_set_style_bg_color(s_modal, lv_color_hex(THEME_BG), 0);
@@ -1435,6 +1488,10 @@ lv_obj_t * screen_create(void) {
 
     /* Start background items load */
     trigger_load_items();
+
+    if (s_restore_pl && s_cur_playlist_name[0] && s_cur_playlist_id[0]) {
+        open_playlist_tracks_view(s_cur_playlist_name, s_cur_playlist_id, s_tracks_source);
+    }
 
     /* Timer for periodic state update */
     s_refresh_timer = lv_timer_create(sonos_modal_tick_cb, 500, NULL);
