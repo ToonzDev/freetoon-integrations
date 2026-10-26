@@ -28,7 +28,7 @@
 extern const lv_font_t font_teletekst_15;
 #define FONT_TELETEKST (&font_teletekst_15)
 #define CHAR_W 9
-#define LINE_H 15
+#define LINE_H 16
 #define PAD_X  6
 #define PAD_Y  6
 #else
@@ -43,6 +43,7 @@ extern const lv_font_t font_teletekst_20;
 #define MAX_CONTENT_RAW  32768
 #define MAX_CONTENT_OUT  65536
 #define MAX_LINKS        48
+#define MAX_BG_BOXES     24
 
 typedef struct {
     char title[32];
@@ -55,6 +56,13 @@ typedef struct {
     int col;
     int len;
 } teletekst_link_t;
+
+typedef struct {
+    uint32_t bg_color;
+    int row;
+    int col;
+    int len;
+} teletekst_bg_t;
 
 typedef struct {
     char page[16];
@@ -77,6 +85,10 @@ static char s_req_page[16] = "101";
 static teletekst_link_t s_links[MAX_LINKS];
 static int s_link_count = 0;
 static lv_obj_t * s_link_btns[MAX_LINKS];
+
+static teletekst_bg_t s_bgs[MAX_BG_BOXES];
+static int s_bg_count = 0;
+static lv_obj_t * s_bg_objs[MAX_BG_BOXES];
 
 static lv_obj_t * s_modal = NULL;
 static lv_obj_t * s_content_box = NULL;
@@ -243,6 +255,25 @@ static int decode_html_entity(const char * p, uint32_t * out_cp, int * entity_le
     return 0;
 }
 
+static void add_bg_segment(uint32_t bg_col, int row, int col_start, int col_end) {
+    if (!bg_col || col_end <= col_start) return;
+    int len = col_end - col_start;
+    if (s_bg_count > 0 &&
+        s_bgs[s_bg_count - 1].row == row &&
+        s_bgs[s_bg_count - 1].bg_color == bg_col &&
+        s_bgs[s_bg_count - 1].col + s_bgs[s_bg_count - 1].len == col_start) {
+        s_bgs[s_bg_count - 1].len += len;
+        return;
+    }
+    if (s_bg_count < MAX_BG_BOXES) {
+        s_bgs[s_bg_count].bg_color = bg_col;
+        s_bgs[s_bg_count].row = row;
+        s_bgs[s_bg_count].col = col_start;
+        s_bgs[s_bg_count].len = len;
+        s_bg_count++;
+    }
+}
+
 /* Convert HTML entities and NOS Teletext spans into LVGL recolor tags and Bedstead mosaic UTF-8 */
 static void parse_teletekst_content(const char * raw_html, char * out, size_t out_max) {
     size_t oi = 0;
@@ -250,10 +281,41 @@ static void parse_teletekst_content(const char * raw_html, char * out, size_t ou
     int in_color = 0;
     int cur_row = 0;
     int cur_col = 0;
+    uint32_t cur_bg_col = 0;
+    int cur_bg_start_col = 0;
     s_link_count = 0;
+    s_bg_count = 0;
 
     while (*p && oi + 16 < out_max) {
-        /* Check span tags with color classes */
+        /* Standard Teletext page is strictly 24 rows (0-23) */
+        if (cur_row >= 24) {
+            break;
+        }
+
+        /* If at start of a line, check if this line is the redundant fastText row */
+        if (cur_col == 0) {
+            const char * eol = strchr(p, '\n');
+            const char * eol2 = strstr(p, "\\n");
+            if (eol2 && (!eol || eol2 < eol)) eol = eol2;
+
+            size_t line_len = eol ? (size_t)(eol - p) : strlen(p);
+            if (line_len < 1024) {
+                char line_peek[1024];
+                memcpy(line_peek, p, line_len);
+                line_peek[line_len] = 0;
+                if (strstr(line_peek, "fastText") != NULL) {
+                    /* Omit redundant fastText row from page content */
+                    if (eol) {
+                        p = (eol == eol2) ? eol + 2 : eol + 1;
+                    } else {
+                        p += line_len;
+                    }
+                    continue;
+                }
+            }
+        }
+
+        /* Check span tags with color and background classes */
         if (strncmp(p, "<span class=", 12) == 0 || strncmp(p, "<span class=\\\"", 14) == 0) {
             const char * end_tag = strchr(p, '>');
             if (!end_tag) break;
@@ -281,6 +343,24 @@ static void parse_teletekst_content(const char * raw_html, char * out, size_t ou
                 oi += clen;
                 in_color = 1;
             }
+
+            /* Background color parsing (e.g. bg-red, bg-blue) */
+            uint32_t new_bg = 0;
+            if (strstr(tag_buf, "bg-red"))        new_bg = 0xcc0000;
+            else if (strstr(tag_buf, "bg-blue"))  new_bg = 0x0044aa;
+            else if (strstr(tag_buf, "bg-green")) new_bg = 0x00aa00;
+            else if (strstr(tag_buf, "bg-yellow"))new_bg = 0xccaa00;
+            else if (strstr(tag_buf, "bg-cyan"))  new_bg = 0x00aaaa;
+            else if (strstr(tag_buf, "bg-white")) new_bg = 0xffffff;
+
+            if (new_bg != cur_bg_col) {
+                if (cur_bg_col) {
+                    add_bg_segment(cur_bg_col, cur_row, cur_bg_start_col, cur_col);
+                }
+                cur_bg_col = new_bg;
+                cur_bg_start_col = cur_col;
+            }
+
             p = end_tag + 1;
             continue;
         }
@@ -289,6 +369,10 @@ static void parse_teletekst_content(const char * raw_html, char * out, size_t ou
             if (in_color) {
                 out[oi++] = '#';
                 in_color = 0;
+            }
+            if (cur_bg_col) {
+                add_bg_segment(cur_bg_col, cur_row, cur_bg_start_col, cur_col);
+                cur_bg_col = 0;
             }
             p += 7;
             continue;
@@ -356,6 +440,10 @@ static void parse_teletekst_content(const char * raw_html, char * out, size_t ou
 
         /* Unescape JSON newlines */
         if (*p == '\\' && *(p + 1) == 'n') {
+            if (cur_bg_col) {
+                add_bg_segment(cur_bg_col, cur_row, cur_bg_start_col, cur_col);
+                cur_bg_start_col = 0;
+            }
             out[oi++] = '\n';
             p += 2;
             cur_row++;
@@ -373,6 +461,10 @@ static void parse_teletekst_content(const char * raw_html, char * out, size_t ou
             continue;
         }
         if (*p == '\n') {
+            if (cur_bg_col) {
+                add_bg_segment(cur_bg_col, cur_row, cur_bg_start_col, cur_col);
+                cur_bg_start_col = 0;
+            }
             out[oi++] = '\n';
             p++;
             cur_row++;
@@ -397,6 +489,11 @@ static void parse_teletekst_content(const char * raw_html, char * out, size_t ou
 
         out[oi++] = *p++;
         cur_col++;
+    }
+
+    if (cur_bg_col) {
+        add_bg_segment(cur_bg_col, cur_row, cur_bg_start_col, cur_col);
+        cur_bg_col = 0;
     }
 
     if (in_color) {
@@ -547,11 +644,17 @@ static void teletekst_request_page(const char * page) {
         lv_label_set_text(s_lbl_content, load_msg);
     }
 
-    /* Clear old line-link buttons while loading */
+    /* Clear old line-link buttons and background banners while loading */
     for (int i = 0; i < MAX_LINKS; i++) {
         if (s_link_btns[i]) {
             lv_obj_del(s_link_btns[i]);
             s_link_btns[i] = NULL;
+        }
+    }
+    for (int i = 0; i < MAX_BG_BOXES; i++) {
+        if (s_bg_objs[i]) {
+            lv_obj_del(s_bg_objs[i]);
+            s_bg_objs[i] = NULL;
         }
     }
 
@@ -583,7 +686,36 @@ static void update_ui_from_state(void) {
         lv_label_set_text(s_lbl_content, s_state.text);
     }
 
-    /* Create clickable link overlays for page numbers detected in text */
+    /* Clear and recreate colored background boxes (drawn behind text) */
+    for (int i = 0; i < MAX_BG_BOXES; i++) {
+        if (s_bg_objs[i]) {
+            lv_obj_del(s_bg_objs[i]);
+            s_bg_objs[i] = NULL;
+        }
+    }
+
+    if (s_content_box) {
+        for (int i = 0; i < s_bg_count; i++) {
+            int bx = PAD_X + s_bgs[i].col * CHAR_W;
+            int by = PAD_Y + s_bgs[i].row * LINE_H;
+            int bw = s_bgs[i].len * CHAR_W;
+            int bh = LINE_H;
+
+            lv_obj_t * bg = lv_obj_create(s_content_box);
+            lv_obj_set_size(bg, bw, bh);
+            lv_obj_set_pos(bg, bx, by);
+            lv_obj_set_style_bg_color(bg, lv_color_hex(s_bgs[i].bg_color), 0);
+            lv_obj_set_style_bg_opa(bg, LV_OPA_COVER, 0);
+            lv_obj_set_style_border_width(bg, 0, 0);
+            lv_obj_set_style_radius(bg, 0, 0);
+            lv_obj_set_style_pad_all(bg, 0, 0);
+            lv_obj_clear_flag(bg, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_move_background(bg);
+            s_bg_objs[i] = bg;
+        }
+    }
+
+    /* Create clickable link overlays for page numbers detected in text (transparent hitboxes) */
     for (int i = 0; i < MAX_LINKS; i++) {
         if (s_link_btns[i]) {
             lv_obj_del(s_link_btns[i]);
@@ -594,23 +726,21 @@ static void update_ui_from_state(void) {
     if (s_content_box) {
         for (int i = 0; i < s_link_count; i++) {
             int lx = PAD_X + s_links[i].col * CHAR_W - 2;
-            int ly = PAD_Y + s_links[i].row * LINE_H - 1;
+            int ly = PAD_Y + s_links[i].row * LINE_H;
             int lw = s_links[i].len * CHAR_W + 4;
-            int lh = LINE_H + 2;
+            int lh = LINE_H;
 
             lv_obj_t * b = lv_btn_create(s_content_box);
             lv_obj_set_size(b, lw, lh);
             lv_obj_set_pos(b, lx, ly);
             lv_obj_set_style_bg_opa(b, LV_OPA_TRANSP, 0);
-            lv_obj_set_style_border_side(b, LV_BORDER_SIDE_BOTTOM, 0);
-            lv_obj_set_style_border_color(b, lv_color_hex(0xffd60a), 0);
-            lv_obj_set_style_border_width(b, 1, 0);
+            lv_obj_set_style_border_width(b, 0, 0);
             lv_obj_set_style_radius(b, 2, 0);
             lv_obj_set_style_pad_all(b, 0, 0);
 
             /* Highlight feedback on press */
             lv_obj_set_style_bg_color(b, lv_color_hex(0xffd60a), LV_STATE_PRESSED);
-            lv_obj_set_style_bg_opa(b, LV_OPA_40, LV_STATE_PRESSED);
+            lv_obj_set_style_bg_opa(b, LV_OPA_30, LV_STATE_PRESSED);
 
             lv_obj_add_event_cb(b, on_page_link_click, LV_EVENT_CLICKED, (void*)s_links[i].page);
             s_link_btns[i] = b;
@@ -771,6 +901,10 @@ static void on_modal_deleted(lv_event_t * e) {
         s_link_btns[i] = NULL;
     }
     s_link_count = 0;
+    for (int i = 0; i < MAX_BG_BOXES; i++) {
+        s_bg_objs[i] = NULL;
+    }
+    s_bg_count = 0;
     s_lbl_numpad_digits = NULL;
 }
 
@@ -889,18 +1023,19 @@ lv_obj_t * screen_create(void) {
     lv_obj_set_style_pad_all(side_panel, 0, 0);
     lv_obj_clear_flag(side_panel, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* Dimensions for Square Numpad and Centered Control Block */
-    int key_size = SY(46);       /* 1:1 square: 46px on Toon 1, 57px on Toon 2 */
+    /* Dimensions for Enlarged Numpad (about 50% wider and taller) and Centered Control Block */
+    int key_w = SX(68);          /* 68px on Toon 1 (~50% wider than previous 46px), 87px on Toon 2 */
+    int key_h = SY(60);          /* 60px on Toon 1 (~35% taller), 75px on Toon 2 */
     int key_gap_x = SX(8);
-    int key_gap_y = SY(6);
-    int block_w = 3 * key_size + 2 * key_gap_x;
+    int key_gap_y = SY(5);
+    int block_w = 3 * key_w + 2 * key_gap_x;
 
-    int disp_h = SY(32);
+    int disp_h = SY(36);
     int gap_disp = SY(8);
-    int keypad_h = 4 * key_size + 3 * key_gap_y;
-    int gap_nav = SY(10);
+    int keypad_h = 4 * key_h + 3 * key_gap_y;
+    int gap_nav = SY(8);
     int nav_w = (block_w - key_gap_x) / 2;
-    int nav_h = SY(32);
+    int nav_h = SY(38);
     int nav_gap_y = SY(6);
     int nav_h_total = 2 * nav_h + nav_gap_y;
     int total_block_h = disp_h + gap_disp + keypad_h + gap_nav + nav_h_total;
@@ -923,11 +1058,11 @@ lv_obj_t * screen_create(void) {
 
     s_lbl_numpad_digits = lv_label_create(disp_box);
     lv_label_set_recolor(s_lbl_numpad_digits, true);
-    lv_obj_set_style_text_font(s_lbl_numpad_digits, SF(15), 0);
+    lv_obj_set_style_text_font(s_lbl_numpad_digits, SF(17), 0);
     lv_label_set_text(s_lbl_numpad_digits, "Pagina:  #ffd60a 101#");
     lv_obj_center(s_lbl_numpad_digits);
 
-    /* 2. Numeric Keypad 3x4 Grid (Square buttons) */
+    /* 2. Numeric Keypad 3x4 Grid (Enlarged buttons) */
     const char * keys[12] = {
         "1", "2", "3",
         "4", "5", "6",
@@ -941,8 +1076,8 @@ lv_obj_t * screen_create(void) {
         int r = i / 3;
         int c = i % 3;
         lv_obj_t * b = lv_btn_create(side_panel);
-        lv_obj_set_size(b, key_size, key_size);
-        lv_obj_set_pos(b, start_x + c * (key_size + key_gap_x), key_start_y + r * (key_size + key_gap_y));
+        lv_obj_set_size(b, key_w, key_h);
+        lv_obj_set_pos(b, start_x + c * (key_w + key_gap_x), key_start_y + r * (key_h + key_gap_y));
 
         if (strcmp(keys[i], "GO") == 0) {
             lv_obj_set_style_bg_color(b, lv_color_hex(0x28cd41), 0);
@@ -957,7 +1092,7 @@ lv_obj_t * screen_create(void) {
 
         lv_obj_t * lbl = lv_label_create(b);
         lv_label_set_text(lbl, (strcmp(keys[i], "DEL") == 0) ? "<" : ((strcmp(keys[i], "GO") == 0) ? "OK" : keys[i]));
-        lv_obj_set_style_text_font(lbl, SF(16), 0);
+        lv_obj_set_style_text_font(lbl, SF(20), 0);
         lv_obj_center(lbl);
     }
 
@@ -975,7 +1110,7 @@ lv_obj_t * screen_create(void) {
 
     lv_obj_t * lbl_ps = lv_label_create(s_btn_prev_sub);
     lv_label_set_text(lbl_ps, "< Deel");
-    lv_obj_set_style_text_font(lbl_ps, SF(11), 0);
+    lv_obj_set_style_text_font(lbl_ps, SF(14), 0);
     lv_obj_center(lbl_ps);
 
     s_btn_next_sub = lv_btn_create(side_panel);
@@ -988,7 +1123,7 @@ lv_obj_t * screen_create(void) {
 
     lv_obj_t * lbl_ns = lv_label_create(s_btn_next_sub);
     lv_label_set_text(lbl_ns, "Deel >");
-    lv_obj_set_style_text_font(lbl_ns, SF(11), 0);
+    lv_obj_set_style_text_font(lbl_ns, SF(14), 0);
     lv_obj_center(lbl_ns);
 
     /* Row 2: Page Steppers (<< Vorige / Volgende >>) */
@@ -1004,7 +1139,7 @@ lv_obj_t * screen_create(void) {
 
     s_lbl_prev_page = lv_label_create(s_btn_prev_page);
     lv_label_set_text(s_lbl_prev_page, "<< Vorige");
-    lv_obj_set_style_text_font(s_lbl_prev_page, SF(11), 0);
+    lv_obj_set_style_text_font(s_lbl_prev_page, SF(14), 0);
     lv_obj_center(s_lbl_prev_page);
 
     s_btn_next_page = lv_btn_create(side_panel);
@@ -1017,7 +1152,7 @@ lv_obj_t * screen_create(void) {
 
     s_lbl_next_page = lv_label_create(s_btn_next_page);
     lv_label_set_text(s_lbl_next_page, "Volgende >>");
-    lv_obj_set_style_text_font(s_lbl_next_page, SF(11), 0);
+    lv_obj_set_style_text_font(s_lbl_next_page, SF(14), 0);
     lv_obj_center(s_lbl_next_page);
 
     /* Timer for async updates (active only during page fetch, paused once loaded) */
