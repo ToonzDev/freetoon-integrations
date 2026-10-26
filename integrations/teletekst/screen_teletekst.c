@@ -326,13 +326,35 @@ static void parse_teletekst_content(const char * raw_html, char * out, size_t ou
             memcpy(tag_buf, p, tlen);
             tag_buf[tlen] = 0;
 
+            /* Background color parsing (e.g. bg-red, bg-blue) */
+            uint32_t new_bg = 0;
+            if (strstr(tag_buf, "bg-red"))        new_bg = 0xcc0000;
+            else if (strstr(tag_buf, "bg-blue"))  new_bg = 0x0044aa;
+            else if (strstr(tag_buf, "bg-green")) new_bg = 0x00aa00;
+            else if (strstr(tag_buf, "bg-yellow"))new_bg = 0xccaa00;
+            else if (strstr(tag_buf, "bg-cyan"))  new_bg = 0x00aaaa;
+            else if (strstr(tag_buf, "bg-white")) new_bg = 0xffffff;
+
+            /* Strip out all bg- color class names so they cannot match foreground checks */
+            char fg_buf[128];
+            strncpy(fg_buf, tag_buf, sizeof(fg_buf) - 1);
+            fg_buf[sizeof(fg_buf) - 1] = 0;
+            const char * bg_names[] = { "bg-red", "bg-blue", "bg-green", "bg-yellow", "bg-cyan", "bg-white", NULL };
+            for (int bgi = 0; bg_names[bgi]; bgi++) {
+                char * p_bg;
+                while ((p_bg = strstr(fg_buf, bg_names[bgi])) != NULL) {
+                    memset(p_bg, ' ', strlen(bg_names[bgi]));
+                }
+            }
+
             const char * hex_col = NULL;
-            if (strstr(tag_buf, "yellow"))      hex_col = "#ffff00 ";
-            else if (strstr(tag_buf, "cyan"))   hex_col = "#00ffff ";
-            else if (strstr(tag_buf, "green"))  hex_col = "#00ff00 ";
-            else if (strstr(tag_buf, "red"))    hex_col = "#ff3333 ";
-            else if (strstr(tag_buf, "blue"))   hex_col = "#3388ff ";
-            else if (strstr(tag_buf, "white"))  hex_col = "#ffffff ";
+            if (strstr(fg_buf, "yellow"))      hex_col = "#ffff00 ";
+            else if (strstr(fg_buf, "cyan"))   hex_col = "#00ffff ";
+            else if (strstr(fg_buf, "green"))  hex_col = "#00ff00 ";
+            else if (strstr(fg_buf, "red"))    hex_col = "#ff3333 ";
+            else if (strstr(fg_buf, "blue"))   hex_col = "#3388ff ";
+            else if (strstr(fg_buf, "white"))  hex_col = "#ffffff ";
+            else if (new_bg)                   hex_col = "#ffffff "; /* default white text on colored bg */
 
             if (hex_col) {
                 if (in_color) {
@@ -343,15 +365,6 @@ static void parse_teletekst_content(const char * raw_html, char * out, size_t ou
                 oi += clen;
                 in_color = 1;
             }
-
-            /* Background color parsing (e.g. bg-red, bg-blue) */
-            uint32_t new_bg = 0;
-            if (strstr(tag_buf, "bg-red"))        new_bg = 0xcc0000;
-            else if (strstr(tag_buf, "bg-blue"))  new_bg = 0x0044aa;
-            else if (strstr(tag_buf, "bg-green")) new_bg = 0x00aa00;
-            else if (strstr(tag_buf, "bg-yellow"))new_bg = 0xccaa00;
-            else if (strstr(tag_buf, "bg-cyan"))  new_bg = 0x00aaaa;
-            else if (strstr(tag_buf, "bg-white")) new_bg = 0xffffff;
 
             if (new_bg != cur_bg_col) {
                 if (cur_bg_col) {
@@ -696,12 +709,13 @@ static void update_ui_from_state(void) {
 
     if (s_content_box) {
         for (int i = 0; i < s_bg_count; i++) {
-            int bx = PAD_X + s_bgs[i].col * CHAR_W;
-            int by = PAD_Y + s_bgs[i].row * LINE_H;
+            int bx = s_bgs[i].col * CHAR_W;
+            int by = s_bgs[i].row * LINE_H;
             int bw = s_bgs[i].len * CHAR_W;
             int bh = LINE_H;
 
             lv_obj_t * bg = lv_obj_create(s_content_box);
+            lv_obj_remove_style_all(bg);
             lv_obj_set_size(bg, bw, bh);
             lv_obj_set_pos(bg, bx, by);
             lv_obj_set_style_bg_color(bg, lv_color_hex(s_bgs[i].bg_color), 0);
@@ -725,18 +739,20 @@ static void update_ui_from_state(void) {
 
     if (s_content_box) {
         for (int i = 0; i < s_link_count; i++) {
-            int lx = PAD_X + s_links[i].col * CHAR_W - 2;
-            int ly = PAD_Y + s_links[i].row * LINE_H;
-            int lw = s_links[i].len * CHAR_W + 4;
+            int lx = s_links[i].col * CHAR_W;
+            int ly = s_links[i].row * LINE_H;
+            int lw = s_links[i].len * CHAR_W;
             int lh = LINE_H;
 
             lv_obj_t * b = lv_btn_create(s_content_box);
+            lv_obj_remove_style_all(b);
             lv_obj_set_size(b, lw, lh);
             lv_obj_set_pos(b, lx, ly);
             lv_obj_set_style_bg_opa(b, LV_OPA_TRANSP, 0);
             lv_obj_set_style_border_width(b, 0, 0);
             lv_obj_set_style_radius(b, 2, 0);
             lv_obj_set_style_pad_all(b, 0, 0);
+            lv_obj_set_ext_click_area(b, 4);
 
             /* Highlight feedback on press */
             lv_obj_set_style_bg_color(b, lv_color_hex(0xffd60a), LV_STATE_PRESSED);
@@ -971,7 +987,10 @@ lv_obj_t * screen_create(void) {
     lv_obj_set_style_border_color(s_content_box, lv_color_hex(0x1c1c1e), 0);
     lv_obj_set_style_border_width(s_content_box, 1, 0);
     lv_obj_set_style_radius(s_content_box, 4, 0);
-    lv_obj_set_style_pad_all(s_content_box, PAD_X, 0);
+    lv_obj_set_style_pad_left(s_content_box, PAD_X, 0);
+    lv_obj_set_style_pad_right(s_content_box, PAD_X, 0);
+    lv_obj_set_style_pad_top(s_content_box, PAD_Y, 0);
+    lv_obj_set_style_pad_bottom(s_content_box, PAD_Y, 0);
     lv_obj_clear_flag(s_content_box, LV_OBJ_FLAG_SCROLLABLE);
 
     s_lbl_content = lv_label_create(s_content_box);
@@ -979,6 +998,8 @@ lv_obj_t * screen_create(void) {
     lv_label_set_long_mode(s_lbl_content, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_color(s_lbl_content, lv_color_hex(0xffffff), 0);
     lv_obj_set_style_text_font(s_lbl_content, FONT_TELETEKST, 0);
+    lv_obj_set_style_pad_all(s_lbl_content, 0, 0);
+    lv_obj_set_style_border_width(s_lbl_content, 0, 0);
     lv_obj_set_width(s_lbl_content, 40 * CHAR_W + 4);
     lv_obj_align(s_lbl_content, LV_ALIGN_TOP_LEFT, 0, 0);
     lv_label_set_text(s_lbl_content, "#ffd60a Teletekst laden...#");
