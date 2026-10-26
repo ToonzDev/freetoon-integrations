@@ -35,4 +35,4 @@ $(SO_OUT): screen_teletekst.c $(FONT_SRC)
 	$(STRIP) $(SO_OUT)
 
 clean:
-	rm -f freetoon-app-teletekst freetoon-app-teletekst.toon1 freetoon-app-teletekst.toon2 teletekst_ui.toon1.so teletekst_ui.toon2.so
+	rm -f freetoon-app-teletekst.toon1 freetoon-app-teletekst.toon2 teletekst_ui.toon1.so teletekst_ui.toon2.so
