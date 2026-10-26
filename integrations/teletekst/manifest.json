@@ -1,0 +1,24 @@
+{
+  "id": "teletekst",
+  "name": "NOS Teletekst",
+  "version": "1.0.0",
+  "binary": "freetoon-app-teletekst",
+  "args": [],
+  "service_id": "teletekst",
+  "tile": {
+    "title": "Teletekst",
+    "color": "0x002266",
+    "icon": "news",
+    "value_field": "title",
+    "value_unit": "",
+    "subtitle_field": "page",
+    "subtitle_unit": ""
+  },
+  "detail_screen": {
+    "type": "plugin",
+    "library": "teletekst_ui.so",
+    "entry": "screen_create"
+  },
+  "description": "Actueel nieuws, sport, weer en verkeer via NOS Teletekst.",
+  "license": "MIT"
+}

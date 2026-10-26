@@ -50,6 +50,13 @@
       "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/ventilation.tgz"
     },
     {
+      "id": "teletekst",
+      "name": "NOS Teletekst",
+      "version": "1.0.0",
+      "description": "Actueel nieuws, sport, weer en verkeer via NOS Teletekst.",
+      "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/teletekst.tgz"
+    },
+    {
       "id": "camera",
       "name": "Deurbel & Camera",
       "version": "1.0.0",
