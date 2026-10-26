@@ -9,12 +9,14 @@ ifeq ($(TARGET),toon1)
   ARCHFLAGS   := -march=armv5te -marm -mfloat-abi=soft -DTOON1
   OUT         ?= freetoon-app-teletekst.toon1
   SO_OUT      := teletekst_ui.toon1.so
+  FONT_SRC    := font_teletekst_15.c
 else
   CROSS       := $(TC_ROOT)/linaro/bin/arm-linux-gnueabihf-
   SYSROOTFLAG := --sysroot=$(TC_ROOT)/linaro/arm-linux-gnueabihf/libc
   ARCHFLAGS   :=
   OUT         ?= freetoon-app-teletekst.toon2
   SO_OUT      := teletekst_ui.toon2.so
+  FONT_SRC    := font_teletekst_20.c
 endif
 
 CC      := $(CROSS)gcc
@@ -28,8 +30,8 @@ $(OUT): teletekst_daemon.c
 	$(CC) $(CFLAGS) teletekst_daemon.c -o $(OUT)
 	$(STRIP) $(OUT)
 
-$(SO_OUT): screen_teletekst.c
-	$(CC) $(CFLAGS) -shared -fPIC $(SO_INC) screen_teletekst.c -o $(SO_OUT)
+$(SO_OUT): screen_teletekst.c $(FONT_SRC)
+	$(CC) $(CFLAGS) -shared -fPIC $(SO_INC) screen_teletekst.c $(FONT_SRC) -o $(SO_OUT)
 	$(STRIP) $(SO_OUT)
 
 clean:
