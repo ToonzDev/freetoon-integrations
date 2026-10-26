@@ -79,8 +79,6 @@ static int s_link_count = 0;
 static lv_obj_t * s_link_btns[MAX_LINKS];
 
 static lv_obj_t * s_modal = NULL;
-static lv_obj_t * s_lbl_header_page = NULL;
-static lv_obj_t * s_lbl_sub_info = NULL;
 static lv_obj_t * s_content_box = NULL;
 static lv_obj_t * s_lbl_content = NULL;
 
@@ -103,6 +101,147 @@ static lv_timer_t * s_ui_timer = NULL;
 /* Forward declarations */
 static void teletekst_request_page(const char * page);
 static void update_ui_from_state(void);
+
+/* HTML entity definition and lookup table */
+typedef struct {
+    const char * name;
+    uint32_t cp;
+} html_entity_t;
+
+static const html_entity_t s_html_entities[] = {
+    { "&quot;",   0x0022 },
+    { "&amp;",    0x0026 },
+    { "&apos;",   0x0027 },
+    { "&#39;",    0x0027 },
+    { "&lt;",     0x003C },
+    { "&gt;",     0x003E },
+    { "&nbsp;",   0x0020 },
+    { "&euml;",   0x00EB },
+    { "&eacute;", 0x00E9 },
+    { "&egrave;", 0x00E8 },
+    { "&iuml;",   0x00EF },
+    { "&oacute;", 0x00F3 },
+    { "&ouml;",   0x00F6 },
+    { "&auml;",   0x00E4 },
+    { "&uuml;",   0x00FC },
+    { "&ccedil;", 0x00E7 },
+    { "&Euml;",   0x00CB },
+    { "&Eacute;", 0x00C9 },
+    { "&Egrave;", 0x00C8 },
+    { "&Iuml;",   0x00CF },
+    { "&Oacute;", 0x00D3 },
+    { "&Ouml;",   0x00D6 },
+    { "&Auml;",   0x00C4 },
+    { "&Uuml;",   0x00DC },
+    { "&Ccedil;", 0x00C7 },
+    { "&aacute;", 0x00E1 },
+    { "&iacute;", 0x00ED },
+    { "&uacute;", 0x00FA },
+    { "&agrave;", 0x00E0 },
+    { "&igrave;", 0x00EC },
+    { "&ograve;", 0x00F2 },
+    { "&ugrave;", 0x00F9 },
+    { "&acirc;",  0x00E2 },
+    { "&ecirc;",  0x00EA },
+    { "&icirc;",  0x00EE },
+    { "&ocirc;",  0x00F4 },
+    { "&ucirc;",  0x00FB },
+    { "&atilde;", 0x00E3 },
+    { "&otilde;", 0x00F5 },
+    { "&ntilde;", 0x00F1 },
+    { "&Ntilde;", 0x00D1 },
+    { "&szlig;",  0x00DF },
+    { "&euro;",   0x20AC },
+    { "&copy;",   0x00A9 },
+    { "&reg;",    0x00AE },
+    { "&deg;",    0x00B0 },
+    { "&plusmn;", 0x00B1 },
+    { "&sup2;",   0x00B2 },
+    { "&sup3;",   0x00B3 },
+    { "&micro;",  0x00B5 },
+    { "&middot;", 0x00B7 },
+    { "&frac12;", 0x00BD },
+    { "&frac14;", 0x00BC },
+    { "&frac34;", 0x00BE },
+    { "&iquest;", 0x00BF },
+    { "&iexcl;",  0x00A1 },
+    { NULL, 0 }
+};
+
+static inline size_t encode_utf8(uint32_t cp, char * out) {
+    if (cp <= 0x7F) {
+        out[0] = (char)cp;
+        return 1;
+    } else if (cp <= 0x7FF) {
+        out[0] = (char)(0xC0 | (cp >> 6));
+        out[1] = (char)(0x80 | (cp & 0x3F));
+        return 2;
+    } else if (cp <= 0xFFFF) {
+        out[0] = (char)(0xE0 | (cp >> 12));
+        out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[2] = (char)(0x80 | (cp & 0x3F));
+        return 3;
+    } else if (cp <= 0x10FFFF) {
+        out[0] = (char)(0xF0 | (cp >> 18));
+        out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+        out[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[3] = (char)(0x80 | (cp & 0x3F));
+        return 4;
+    }
+    return 0;
+}
+
+static int decode_html_entity(const char * p, uint32_t * out_cp, int * entity_len) {
+    if (*p != '&') return 0;
+
+    /* Hex numeric entity: &#xHH; or &#XHH; */
+    if (strncmp(p, "&#x", 3) == 0 || strncmp(p, "&#X", 3) == 0) {
+        const char * semi = strchr(p + 3, ';');
+        if (semi && semi <= p + 10) {
+            char hex_buf[16];
+            size_t len = (size_t)(semi - (p + 3));
+            memcpy(hex_buf, p + 3, len);
+            hex_buf[len] = 0;
+            char * end = NULL;
+            unsigned long val = strtoul(hex_buf, &end, 16);
+            if (end == hex_buf + len) {
+                *out_cp = (uint32_t)val;
+                *entity_len = (int)(semi - p + 1);
+                return 1;
+            }
+        }
+    }
+
+    /* Decimal numeric entity: &#DDD; */
+    if (strncmp(p, "&#", 2) == 0 && isdigit((unsigned char)p[2])) {
+        const char * semi = strchr(p + 2, ';');
+        if (semi && semi <= p + 10) {
+            char dec_buf[16];
+            size_t len = (size_t)(semi - (p + 2));
+            memcpy(dec_buf, p + 2, len);
+            dec_buf[len] = 0;
+            char * end = NULL;
+            unsigned long val = strtoul(dec_buf, &end, 10);
+            if (end == dec_buf + len) {
+                *out_cp = (uint32_t)val;
+                *entity_len = (int)(semi - p + 1);
+                return 1;
+            }
+        }
+    }
+
+    /* Named HTML entities */
+    for (int i = 0; s_html_entities[i].name != NULL; i++) {
+        size_t nlen = strlen(s_html_entities[i].name);
+        if (strncmp(p, s_html_entities[i].name, nlen) == 0) {
+            *out_cp = s_html_entities[i].cp;
+            *entity_len = (int)nlen;
+            return 1;
+        }
+    }
+
+    return 0;
+}
 
 /* Convert HTML entities and NOS Teletext spans into LVGL recolor tags and Bedstead mosaic UTF-8 */
 static void parse_teletekst_content(const char * raw_html, char * out, size_t out_max) {
@@ -194,33 +333,23 @@ static void parse_teletekst_content(const char * raw_html, char * out, size_t ou
         }
 
         /*
-         * NOS Teletext mosaic characters: &#xF020; to &#xF07F;
+         * HTML entities (named like &euml;, numeric &#DDD;, hex &#xHH;,
+         * and NOS Teletext mosaic characters &#xF020; to &#xF07F;).
          * In Bedstead, the 64 mosaic block graphics are mapped to 0xEE20 to 0xEE7F.
-         * Codepoint: 0xEE00 + hex_val.
-         * UTF-8 for 0xEE00-0xEE7F: 3 bytes: 0xEE, 0x80 | ((cp >> 6) & 0x3F), 0x80 | (cp & 0x3F).
          */
-        if (strncmp(p, "&#xF0", 5) == 0 && isxdigit((unsigned char)p[5]) && isxdigit((unsigned char)p[6]) && p[7] == ';') {
-            char hex_str[3] = { p[5], p[6], 0 };
-            uint32_t byte_val = (uint32_t)strtoul(hex_str, NULL, 16);
-            if (byte_val >= 0x20 && byte_val <= 0x7F) {
-                uint32_t target_cp = 0xEE00 + byte_val;
-                out[oi++] = (char)(0xE0 | (target_cp >> 12));
-                out[oi++] = (char)(0x80 | ((target_cp >> 6) & 0x3F));
-                out[oi++] = (char)(0x80 | (target_cp & 0x3F));
-                p += 8;
-                cur_col++;
-                continue;
+        uint32_t ent_cp = 0;
+        int ent_len = 0;
+        if (decode_html_entity(p, &ent_cp, &ent_len)) {
+            if (ent_cp >= 0xF020 && ent_cp <= 0xF07F) {
+                ent_cp = 0xEE00 + (ent_cp & 0xFF);
             }
-        }
-
-        /* HTML character entities */
-        if (strncmp(p, "&quot;", 6) == 0) { out[oi++] = '"'; p += 6; cur_col++; continue; }
-        if (strncmp(p, "&amp;", 5) == 0)  { out[oi++] = '&'; p += 5; cur_col++; continue; }
-        if (strncmp(p, "&lt;", 4) == 0)   { out[oi++] = '<'; p += 4; cur_col++; continue; }
-        if (strncmp(p, "&gt;", 4) == 0)   { out[oi++] = '>'; p += 4; cur_col++; continue; }
-        if (strncmp(p, "&apos;", 6) == 0 || strncmp(p, "&#39;", 5) == 0) {
-            out[oi++] = '\'';
-            p += (strncmp(p, "&#39;", 5) == 0) ? 5 : 6;
+            if (ent_cp == '#') {
+                out[oi++] = '#';
+                out[oi++] = '#';
+            } else {
+                oi += encode_utf8(ent_cp, out + oi);
+            }
+            p += ent_len;
             cur_col++;
             continue;
         }
@@ -257,6 +386,12 @@ static void parse_teletekst_content(const char * raw_html, char * out, size_t ou
             out[oi++] = '#';
             p++;
             cur_col++;
+            continue;
+        }
+
+        /* UTF-8 continuation byte: copy byte but do not increment cur_col */
+        if (((unsigned char)*p & 0xC0) == 0x80) {
+            out[oi++] = *p++;
             continue;
         }
 
@@ -411,11 +546,6 @@ static void teletekst_request_page(const char * page) {
         snprintf(load_msg, sizeof load_msg, "#ffff00 Pagina %s laden...#", page);
         lv_label_set_text(s_lbl_content, load_msg);
     }
-    if (s_lbl_header_page) {
-        char pbuf[32];
-        snprintf(pbuf, sizeof pbuf, "#ffff00 %s#", page);
-        lv_label_set_text(s_lbl_header_page, pbuf);
-    }
 
     /* Clear old line-link buttons while loading */
     for (int i = 0; i < MAX_LINKS; i++) {
@@ -446,24 +576,6 @@ static void update_ui_from_state(void) {
             lv_label_set_text(s_lbl_content, err_msg);
         }
         return;
-    }
-
-    /* Update header page and subpage indicator */
-    if (s_lbl_header_page) {
-        char pbuf[32];
-        snprintf(pbuf, sizeof pbuf, "#ffff00 %s#", s_state.page);
-        lv_label_set_text(s_lbl_header_page, pbuf);
-    }
-    if (s_lbl_sub_info) {
-        if (s_state.next_sub[0] || s_state.prev_sub[0]) {
-            char sbuf[32];
-            const char * cur = strchr(s_state.page, '-');
-            snprintf(sbuf, sizeof sbuf, "Deel %s", cur ? cur + 1 : "1");
-            lv_label_set_text(s_lbl_sub_info, sbuf);
-            lv_obj_clear_flag(s_lbl_sub_info, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_add_flag(s_lbl_sub_info, LV_OBJ_FLAG_HIDDEN);
-        }
     }
 
     /* Update text body */
@@ -593,11 +705,6 @@ static void on_next_sub_click(lv_event_t * e) {
     if (s_state.next_sub[0]) teletekst_request_page(s_state.next_sub);
 }
 
-static void on_quick_cat_click(lv_event_t * e) {
-    const char * target = (const char *)lv_event_get_user_data(e);
-    if (target) teletekst_request_page(target);
-}
-
 static void on_fasttext_click(lv_event_t * e) {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
     if (idx >= 0 && idx < s_state.fasttext_count) {
@@ -650,8 +757,6 @@ static void on_modal_deleted(lv_event_t * e) {
         s_ui_timer = NULL;
     }
     s_modal = NULL;
-    s_lbl_header_page = NULL;
-    s_lbl_sub_info = NULL;
     s_content_box = NULL;
     s_lbl_content = NULL;
     s_btn_prev_page = NULL;
@@ -687,87 +792,43 @@ lv_obj_t * screen_create(void) {
     lv_obj_set_style_pad_all(s_modal, 0, 0);
     lv_obj_clear_flag(s_modal, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* --- Header Bar --- */
-    int header_h = SY(42);
-    lv_obj_t * header = lv_obj_create(s_modal);
-    lv_obj_set_size(header, LV_HOR_RES, header_h);
-    lv_obj_align(header, LV_ALIGN_TOP_MID, 0, 0);
-    lv_obj_set_style_bg_color(header, lv_color_hex(0x111111), 0);
-    lv_obj_set_style_border_color(header, lv_color_hex(0x282828), 0);
-    lv_obj_set_style_border_width(header, 1, 0);
-    lv_obj_set_style_border_side(header, LV_BORDER_SIDE_BOTTOM, 0);
-    lv_obj_set_style_radius(header, 0, 0);
-    lv_obj_set_style_pad_all(header, 0, 0);
-    lv_obj_clear_flag(header, LV_OBJ_FLAG_SCROLLABLE);
+    /* Close & Refresh buttons in top-right corner (large touch targets matching FreeToon modal style) */
+    int x_w = (LV_VER_RES < 600) ? 60 : 70;
+    int x_h = (LV_VER_RES < 600) ? 44 : 50;
 
-    /* Logo & Current Page */
-    lv_obj_t * title = lv_label_create(header);
-    lv_label_set_recolor(title, true);
-    lv_label_set_text(title, "#00ff00 NOS# #ffff00 TT#");
-    lv_obj_set_style_text_font(title, SF(17), 0);
-    lv_obj_align(title, LV_ALIGN_LEFT_MID, SX(12), 0);
-
-    s_lbl_header_page = lv_label_create(header);
-    lv_label_set_recolor(s_lbl_header_page, true);
-    lv_label_set_text(s_lbl_header_page, "#ffff00 101#");
-    lv_obj_set_style_text_font(s_lbl_header_page, SF(22), 0);
-    lv_obj_align(s_lbl_header_page, LV_ALIGN_LEFT_MID, SX(130), 0);
-
-    s_lbl_sub_info = lv_label_create(header);
-    lv_obj_set_style_text_color(s_lbl_sub_info, lv_color_hex(0x8e8e93), 0);
-    lv_obj_set_style_text_font(s_lbl_sub_info, SF(13), 0);
-    lv_label_set_text(s_lbl_sub_info, "");
-    lv_obj_align(s_lbl_sub_info, LV_ALIGN_LEFT_MID, SX(182), 0);
-    lv_obj_add_flag(s_lbl_sub_info, LV_OBJ_FLAG_HIDDEN);
-
-    /* Quick category pill shortcuts */
-    const char * cats[] = {"101", "102", "103", "601", "702", "730"};
-    const char * cat_names[] = {"Nieuws", "Binnenl", "Buitenl", "Sport", "Weer", "Verkeer"};
-    int cat_x = SX(238);
-    for (int i = 0; i < 6; i++) {
-        lv_obj_t * b = lv_btn_create(header);
-        lv_obj_set_size(b, SX(62), SY(28));
-        lv_obj_align(b, LV_ALIGN_LEFT_MID, cat_x + i * SX(66), 0);
-        lv_obj_set_style_bg_color(b, lv_color_hex(0x222222), 0);
-        lv_obj_set_style_radius(b, 6, 0);
-        lv_obj_set_style_pad_all(b, 0, 0);
-        lv_obj_add_event_cb(b, on_quick_cat_click, LV_EVENT_CLICKED, (void*)cats[i]);
-
-        lv_obj_t * lbl = lv_label_create(b);
-        lv_label_set_text(lbl, cat_names[i]);
-        lv_obj_set_style_text_font(lbl, SF(11), 0);
-        lv_obj_center(lbl);
-    }
-
-    /* Refresh button */
-    lv_obj_t * b_ref = lv_btn_create(header);
-    lv_obj_set_size(b_ref, SX(34), SY(28));
-    lv_obj_align(b_ref, LV_ALIGN_RIGHT_MID, SX(-46), 0);
-    lv_obj_set_style_bg_color(b_ref, lv_color_hex(0x2c2c2e), 0);
-    lv_obj_set_style_radius(b_ref, 6, 0);
-    lv_obj_add_event_cb(b_ref, on_refresh_click, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_t * lbl_ref = lv_label_create(b_ref);
-    lv_label_set_text(lbl_ref, LV_SYMBOL_REFRESH);
-    lv_obj_set_style_text_font(lbl_ref, SF(14), 0);
-    lv_obj_center(lbl_ref);
-
-    /* Close button */
-    lv_obj_t * b_close = lv_btn_create(header);
-    lv_obj_set_size(b_close, SX(34), SY(28));
-    lv_obj_align(b_close, LV_ALIGN_RIGHT_MID, SX(-8), 0);
-    lv_obj_set_style_bg_color(b_close, lv_color_hex(0x2c2c2e), 0);
-    lv_obj_set_style_radius(b_close, 6, 0);
+    lv_obj_t * b_close = lv_btn_create(s_modal);
+    lv_obj_set_size(b_close, x_w, x_h);
+    lv_obj_align(b_close, LV_ALIGN_TOP_RIGHT, SX(-12), SY(8));
+    lv_obj_set_style_bg_color(b_close, lv_color_hex(0x28282b), 0);
+    lv_obj_set_style_radius(b_close, 10, 0);
+    lv_obj_set_ext_click_area(b_close, 20);
     lv_obj_add_event_cb(b_close, on_close_click, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t * lbl_close = lv_label_create(b_close);
     lv_label_set_text(lbl_close, LV_SYMBOL_CLOSE);
-    lv_obj_set_style_text_font(lbl_close, SF(14), 0);
+    lv_obj_set_style_text_font(lbl_close, SF(22), 0);
     lv_obj_center(lbl_close);
 
+    lv_obj_t * b_ref = lv_btn_create(s_modal);
+    lv_obj_set_size(b_ref, x_w - SX(6), x_h);
+    lv_obj_align(b_ref, LV_ALIGN_TOP_RIGHT, SX(-12) - x_w - SX(8), SY(8));
+    lv_obj_set_style_bg_color(b_ref, lv_color_hex(0x28282b), 0);
+    lv_obj_set_style_radius(b_ref, 10, 0);
+    lv_obj_set_ext_click_area(b_ref, 20);
+    lv_obj_add_event_cb(b_ref, on_refresh_click, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t * lbl_ref = lv_label_create(b_ref);
+    lv_label_set_text(lbl_ref, LV_SYMBOL_REFRESH);
+    lv_obj_set_style_text_font(lbl_ref, SF(20), 0);
+    lv_obj_center(lbl_ref);
+
     /* --- Left Panel: CRT Teletext Content Box --- */
+    int ft_h = (LV_VER_RES < 600) ? 26 : 32;
+    int ft_gap_y = SY(4);
+    int total_screen_h = content_h + ft_gap_y + ft_h;
+    int top_y = LV_VER_RES - total_screen_h - SY(10);
+    if (top_y < SY(56)) top_y = SY(56);
     int left_x = SX(12);
-    int top_y = header_h + SY(4);
 
     s_content_box = lv_obj_create(s_modal);
     lv_obj_set_size(s_content_box, content_w, content_h);
@@ -789,8 +850,7 @@ lv_obj_t * screen_create(void) {
     lv_label_set_text(s_lbl_content, "#ffd60a Teletekst laden...#");
 
     /* --- Left Panel: FastText 4 Color Buttons Aligned to Exact Page Width Below --- */
-    int ft_y = top_y + content_h + SY(4);
-    int ft_h = SY(28);
+    int ft_y = top_y + content_h + ft_gap_y;
 
     uint32_t ft_colors[4] = { 0xcc0000, 0x008800, 0xccaa00, 0x0066cc };
     uint32_t ft_text_colors[4] = { 0xffffff, 0xffffff, 0x000000, 0xffffff };
@@ -817,7 +877,7 @@ lv_obj_t * screen_create(void) {
     /* --- Right Panel: Data Entry Panel (Keypad + Glued Scroll Navigation) --- */
     int panel_x = left_x + content_w + SX(12);
     int panel_w = LV_HOR_RES - panel_x - SX(12);
-    int panel_h = content_h + ft_h + SY(4);
+    int panel_h = total_screen_h;
 
     lv_obj_t * side_panel = lv_obj_create(s_modal);
     lv_obj_set_size(side_panel, panel_w, panel_h);
@@ -826,14 +886,34 @@ lv_obj_t * screen_create(void) {
     lv_obj_set_style_border_color(side_panel, lv_color_hex(0x28282a), 0);
     lv_obj_set_style_border_width(side_panel, 1, 0);
     lv_obj_set_style_radius(side_panel, 8, 0);
-    lv_obj_set_style_pad_all(side_panel, SX(10), 0);
+    lv_obj_set_style_pad_all(side_panel, 0, 0);
     lv_obj_clear_flag(side_panel, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* 1. Page Display (top of right panel) */
+    /* Dimensions for Square Numpad and Centered Control Block */
+    int key_size = SY(46);       /* 1:1 square: 46px on Toon 1, 57px on Toon 2 */
+    int key_gap_x = SX(8);
+    int key_gap_y = SY(6);
+    int block_w = 3 * key_size + 2 * key_gap_x;
+
+    int disp_h = SY(32);
+    int gap_disp = SY(8);
+    int keypad_h = 4 * key_size + 3 * key_gap_y;
+    int gap_nav = SY(10);
+    int nav_w = (block_w - key_gap_x) / 2;
+    int nav_h = SY(32);
+    int nav_gap_y = SY(6);
+    int nav_h_total = 2 * nav_h + nav_gap_y;
+    int total_block_h = disp_h + gap_disp + keypad_h + gap_nav + nav_h_total;
+
+    int start_x = (panel_w - block_w) / 2;
+    if (start_x < 0) start_x = 0;
+    int start_y = (panel_h - total_block_h) / 2;
+    if (start_y < SY(4)) start_y = SY(4);
+
+    /* 1. Page Display */
     lv_obj_t * disp_box = lv_obj_create(side_panel);
-    int disp_h = SY(34);
-    lv_obj_set_size(disp_box, panel_w - SX(20), disp_h);
-    lv_obj_align(disp_box, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_size(disp_box, block_w, disp_h);
+    lv_obj_set_pos(disp_box, start_x, start_y);
     lv_obj_set_style_bg_color(disp_box, lv_color_hex(0x000000), 0);
     lv_obj_set_style_border_color(disp_box, lv_color_hex(0x3a3a3c), 0);
     lv_obj_set_style_border_width(disp_box, 1, 0);
@@ -843,11 +923,11 @@ lv_obj_t * screen_create(void) {
 
     s_lbl_numpad_digits = lv_label_create(disp_box);
     lv_label_set_recolor(s_lbl_numpad_digits, true);
-    lv_obj_set_style_text_font(s_lbl_numpad_digits, SF(17), 0);
+    lv_obj_set_style_text_font(s_lbl_numpad_digits, SF(15), 0);
     lv_label_set_text(s_lbl_numpad_digits, "Pagina:  #ffd60a 101#");
     lv_obj_center(s_lbl_numpad_digits);
 
-    /* 2. Numeric Keypad 3x4 Grid */
+    /* 2. Numeric Keypad 3x4 Grid (Square buttons) */
     const char * keys[12] = {
         "1", "2", "3",
         "4", "5", "6",
@@ -855,18 +935,14 @@ lv_obj_t * screen_create(void) {
         "DEL", "0", "GO"
     };
 
-    int key_gap_x = SX(6);
-    int key_gap_y = SY(5);
-    int key_w = (panel_w - SX(20) - (2 * key_gap_x)) / 3;
-    int key_h = SY(40);
-    int key_start_y = disp_h + SY(8);
+    int key_start_y = start_y + disp_h + gap_disp;
 
     for (int i = 0; i < 12; i++) {
         int r = i / 3;
         int c = i % 3;
         lv_obj_t * b = lv_btn_create(side_panel);
-        lv_obj_set_size(b, key_w, key_h);
-        lv_obj_set_pos(b, c * (key_w + key_gap_x), key_start_y + r * (key_h + key_gap_y));
+        lv_obj_set_size(b, key_size, key_size);
+        lv_obj_set_pos(b, start_x + c * (key_size + key_gap_x), key_start_y + r * (key_size + key_gap_y));
 
         if (strcmp(keys[i], "GO") == 0) {
             lv_obj_set_style_bg_color(b, lv_color_hex(0x28cd41), 0);
@@ -881,20 +957,17 @@ lv_obj_t * screen_create(void) {
 
         lv_obj_t * lbl = lv_label_create(b);
         lv_label_set_text(lbl, (strcmp(keys[i], "DEL") == 0) ? "<" : ((strcmp(keys[i], "GO") == 0) ? "OK" : keys[i]));
-        lv_obj_set_style_text_font(lbl, SF(17), 0);
+        lv_obj_set_style_text_font(lbl, SF(16), 0);
         lv_obj_center(lbl);
     }
 
     /* 3. Four Glued Navigation / Scroll Buttons Below Keypad */
-    int nav_start_y = key_start_y + 4 * (key_h + key_gap_y) + SY(8);
-    int nav_gap = SX(6);
-    int nav_w = (panel_w - SX(20) - nav_gap) / 2;
-    int nav_h = SY(34);
+    int nav_start_y = key_start_y + keypad_h + gap_nav;
 
     /* Row 1: Subpage buttons (< Deel / Deel >) */
     s_btn_prev_sub = lv_btn_create(side_panel);
     lv_obj_set_size(s_btn_prev_sub, nav_w, nav_h);
-    lv_obj_set_pos(s_btn_prev_sub, 0, nav_start_y);
+    lv_obj_set_pos(s_btn_prev_sub, start_x, nav_start_y);
     lv_obj_set_style_bg_color(s_btn_prev_sub, lv_color_hex(0x2c2c2e), 0);
     lv_obj_set_style_radius(s_btn_prev_sub, 6, 0);
     lv_obj_set_style_pad_all(s_btn_prev_sub, 0, 0);
@@ -902,12 +975,12 @@ lv_obj_t * screen_create(void) {
 
     lv_obj_t * lbl_ps = lv_label_create(s_btn_prev_sub);
     lv_label_set_text(lbl_ps, "< Deel");
-    lv_obj_set_style_text_font(lbl_ps, SF(13), 0);
+    lv_obj_set_style_text_font(lbl_ps, SF(11), 0);
     lv_obj_center(lbl_ps);
 
     s_btn_next_sub = lv_btn_create(side_panel);
     lv_obj_set_size(s_btn_next_sub, nav_w, nav_h);
-    lv_obj_set_pos(s_btn_next_sub, nav_w + nav_gap, nav_start_y);
+    lv_obj_set_pos(s_btn_next_sub, start_x + nav_w + key_gap_x, nav_start_y);
     lv_obj_set_style_bg_color(s_btn_next_sub, lv_color_hex(0x2c2c2e), 0);
     lv_obj_set_style_radius(s_btn_next_sub, 6, 0);
     lv_obj_set_style_pad_all(s_btn_next_sub, 0, 0);
@@ -915,15 +988,15 @@ lv_obj_t * screen_create(void) {
 
     lv_obj_t * lbl_ns = lv_label_create(s_btn_next_sub);
     lv_label_set_text(lbl_ns, "Deel >");
-    lv_obj_set_style_text_font(lbl_ns, SF(13), 0);
+    lv_obj_set_style_text_font(lbl_ns, SF(11), 0);
     lv_obj_center(lbl_ns);
 
     /* Row 2: Page Steppers (<< Vorige / Volgende >>) */
-    int page_nav_y = nav_start_y + nav_h + SY(6);
+    int page_nav_y = nav_start_y + nav_h + nav_gap_y;
 
     s_btn_prev_page = lv_btn_create(side_panel);
     lv_obj_set_size(s_btn_prev_page, nav_w, nav_h);
-    lv_obj_set_pos(s_btn_prev_page, 0, page_nav_y);
+    lv_obj_set_pos(s_btn_prev_page, start_x, page_nav_y);
     lv_obj_set_style_bg_color(s_btn_prev_page, lv_color_hex(0x2c2c2e), 0);
     lv_obj_set_style_radius(s_btn_prev_page, 6, 0);
     lv_obj_set_style_pad_all(s_btn_prev_page, 0, 0);
@@ -931,12 +1004,12 @@ lv_obj_t * screen_create(void) {
 
     s_lbl_prev_page = lv_label_create(s_btn_prev_page);
     lv_label_set_text(s_lbl_prev_page, "<< Vorige");
-    lv_obj_set_style_text_font(s_lbl_prev_page, SF(13), 0);
+    lv_obj_set_style_text_font(s_lbl_prev_page, SF(11), 0);
     lv_obj_center(s_lbl_prev_page);
 
     s_btn_next_page = lv_btn_create(side_panel);
     lv_obj_set_size(s_btn_next_page, nav_w, nav_h);
-    lv_obj_set_pos(s_btn_next_page, nav_w + nav_gap, page_nav_y);
+    lv_obj_set_pos(s_btn_next_page, start_x + nav_w + key_gap_x, page_nav_y);
     lv_obj_set_style_bg_color(s_btn_next_page, lv_color_hex(0x2c2c2e), 0);
     lv_obj_set_style_radius(s_btn_next_page, 6, 0);
     lv_obj_set_style_pad_all(s_btn_next_page, 0, 0);
@@ -944,7 +1017,7 @@ lv_obj_t * screen_create(void) {
 
     s_lbl_next_page = lv_label_create(s_btn_next_page);
     lv_label_set_text(s_lbl_next_page, "Volgende >>");
-    lv_obj_set_style_text_font(s_lbl_next_page, SF(13), 0);
+    lv_obj_set_style_text_font(s_lbl_next_page, SF(11), 0);
     lv_obj_center(s_lbl_next_page);
 
     /* Timer for async updates (active only during page fetch, paused once loaded) */

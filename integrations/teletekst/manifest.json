@@ -1,7 +1,7 @@
 {
   "id": "teletekst",
   "name": "NOS Teletekst",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "binary": "freetoon-app-teletekst",
   "args": [],
   "service_id": "teletekst",

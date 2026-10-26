@@ -18,8 +18,144 @@
 #include <sys/time.h>
 #include <time.h>
 
+#include <ctype.h>
+#include <stdint.h>
+
 #define STATE_PATH "/mnt/data/integrations/teletekst/state.json"
 #define POLL_INTERVAL_S 300   /* 5 minutes */
+
+typedef struct {
+    const char * name;
+    uint32_t cp;
+} html_entity_t;
+
+static const html_entity_t s_html_entities[] = {
+    { "&quot;",   0x0022 },
+    { "&amp;",    0x0026 },
+    { "&apos;",   0x0027 },
+    { "&#39;",    0x0027 },
+    { "&lt;",     0x003C },
+    { "&gt;",     0x003E },
+    { "&nbsp;",   0x0020 },
+    { "&euml;",   0x00EB },
+    { "&eacute;", 0x00E9 },
+    { "&egrave;", 0x00E8 },
+    { "&iuml;",   0x00EF },
+    { "&oacute;", 0x00F3 },
+    { "&ouml;",   0x00F6 },
+    { "&auml;",   0x00E4 },
+    { "&uuml;",   0x00FC },
+    { "&ccedil;", 0x00E7 },
+    { "&Euml;",   0x00CB },
+    { "&Eacute;", 0x00C9 },
+    { "&Egrave;", 0x00C8 },
+    { "&Iuml;",   0x00CF },
+    { "&Oacute;", 0x00D3 },
+    { "&Ouml;",   0x00D6 },
+    { "&Auml;",   0x00C4 },
+    { "&Uuml;",   0x00DC },
+    { "&Ccedil;", 0x00C7 },
+    { "&aacute;", 0x00E1 },
+    { "&iacute;", 0x00ED },
+    { "&uacute;", 0x00FA },
+    { "&agrave;", 0x00E0 },
+    { "&igrave;", 0x00EC },
+    { "&ograve;", 0x00F2 },
+    { "&ugrave;", 0x00F9 },
+    { "&acirc;",  0x00E2 },
+    { "&ecirc;",  0x00EA },
+    { "&icirc;",  0x00EE },
+    { "&ocirc;",  0x00F4 },
+    { "&ucirc;",  0x00FB },
+    { "&atilde;", 0x00E3 },
+    { "&otilde;", 0x00F5 },
+    { "&ntilde;", 0x00F1 },
+    { "&Ntilde;", 0x00D1 },
+    { "&szlig;",  0x00DF },
+    { "&euro;",   0x20AC },
+    { "&copy;",   0x00A9 },
+    { "&reg;",    0x00AE },
+    { "&deg;",    0x00B0 },
+    { "&plusmn;", 0x00B1 },
+    { "&sup2;",   0x00B2 },
+    { "&sup3;",   0x00B3 },
+    { "&micro;",  0x00B5 },
+    { "&middot;", 0x00B7 },
+    { "&frac12;", 0x00BD },
+    { "&frac14;", 0x00BC },
+    { "&frac34;", 0x00BE },
+    { "&iquest;", 0x00BF },
+    { "&iexcl;",  0x00A1 },
+    { NULL, 0 }
+};
+
+static inline size_t encode_utf8(uint32_t cp, char * out) {
+    if (cp <= 0x7F) {
+        out[0] = (char)cp;
+        return 1;
+    } else if (cp <= 0x7FF) {
+        out[0] = (char)(0xC0 | (cp >> 6));
+        out[1] = (char)(0x80 | (cp & 0x3F));
+        return 2;
+    } else if (cp <= 0xFFFF) {
+        out[0] = (char)(0xE0 | (cp >> 12));
+        out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[2] = (char)(0x80 | (cp & 0x3F));
+        return 3;
+    } else if (cp <= 0x10FFFF) {
+        out[0] = (char)(0xF0 | (cp >> 18));
+        out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+        out[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[3] = (char)(0x80 | (cp & 0x3F));
+        return 4;
+    }
+    return 0;
+}
+
+static int decode_html_entity(const char * p, uint32_t * out_cp, int * entity_len) {
+    if (*p != '&') return 0;
+    if (strncmp(p, "&#x", 3) == 0 || strncmp(p, "&#X", 3) == 0) {
+        const char * semi = strchr(p + 3, ';');
+        if (semi && semi <= p + 10) {
+            char hex_buf[16];
+            size_t len = (size_t)(semi - (p + 3));
+            memcpy(hex_buf, p + 3, len);
+            hex_buf[len] = 0;
+            char * end = NULL;
+            unsigned long val = strtoul(hex_buf, &end, 16);
+            if (end == hex_buf + len) {
+                *out_cp = (uint32_t)val;
+                *entity_len = (int)(semi - p + 1);
+                return 1;
+            }
+        }
+    }
+    if (strncmp(p, "&#", 2) == 0 && isdigit((unsigned char)p[2])) {
+        const char * semi = strchr(p + 2, ';');
+        if (semi && semi <= p + 10) {
+            char dec_buf[16];
+            size_t len = (size_t)(semi - (p + 2));
+            memcpy(dec_buf, p + 2, len);
+            dec_buf[len] = 0;
+            char * end = NULL;
+            unsigned long val = strtoul(dec_buf, &end, 10);
+            if (end == dec_buf + len) {
+                *out_cp = (uint32_t)val;
+                *entity_len = (int)(semi - p + 1);
+                return 1;
+            }
+        }
+    }
+    for (int i = 0; s_html_entities[i].name != NULL; i++) {
+        size_t nlen = strlen(s_html_entities[i].name);
+        if (strncmp(p, s_html_entities[i].name, nlen) == 0) {
+            *out_cp = s_html_entities[i].cp;
+            *entity_len = (int)nlen;
+            return 1;
+        }
+    }
+    return 0;
+}
 
 static volatile int g_running = 1;
 
@@ -77,22 +213,15 @@ static int post_to_freetoon(const char * title, const char * page) {
 static void clean_html_escapes(char * s) {
     char * p = s;
     while (*p) {
-        if (strncmp(p, "&quot;", 6) == 0) {
-            *p = '"';
-            memmove(p + 1, p + 6, strlen(p + 6) + 1);
-        } else if (strncmp(p, "&amp;", 5) == 0) {
-            *p = '&';
-            memmove(p + 1, p + 5, strlen(p + 5) + 1);
-        } else if (strncmp(p, "&lt;", 4) == 0) {
-            *p = '<';
-            memmove(p + 1, p + 4, strlen(p + 4) + 1);
-        } else if (strncmp(p, "&gt;", 4) == 0) {
-            *p = '>';
-            memmove(p + 1, p + 4, strlen(p + 4) + 1);
-        } else if (strncmp(p, "&apos;", 6) == 0 || strncmp(p, "&#39;", 5) == 0) {
-            *p = '\'';
-            int skip = (strncmp(p, "&#39;", 5) == 0) ? 5 : 6;
-            memmove(p + 1, p + skip, strlen(p + skip) + 1);
+        uint32_t cp = 0;
+        int elen = 0;
+        if (decode_html_entity(p, &cp, &elen)) {
+            char u[8];
+            size_t un = encode_utf8(cp, u);
+            memmove(p + un, p + elen, strlen(p + elen) + 1);
+            memcpy(p, u, un);
+            p += un;
+            continue;
         }
         p++;
     }

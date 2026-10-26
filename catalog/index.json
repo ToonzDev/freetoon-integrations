@@ -52,7 +52,7 @@
     {
       "id": "teletekst",
       "name": "NOS Teletekst",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "description": "Actueel nieuws, sport, weer en verkeer via NOS Teletekst.",
       "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/teletekst.tgz"
     },
