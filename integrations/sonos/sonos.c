@@ -1272,7 +1272,10 @@ static void * soap_cmd_worker(void * arg) {
 }
 
 static void send_upnp_cmd(const char * ctrl, const char * svc, const char * act, const char * body) {
-    if (!settings.sonos_enabled || !g_active_ip[0]) return;
+    if (!g_active_ip[0]) {
+        fprintf(stderr, "[sonos] send_upnp_cmd '%s' dropped: no active IP\n", act ? act : "");
+        return;
+    }
     soap_cmd_t * c = malloc(sizeof *c);
     if (!c) return;
     snprintf(c->control_path, sizeof c->control_path, "%s", ctrl);
@@ -1835,7 +1838,7 @@ static void * enqueue_play_worker(void * arg) {
 }
 
 static void sonos_enqueue_and_play(const char * uri, const char * meta, const char * name) {
-    if (!settings.sonos_enabled || !g_active_ip[0]) return;
+    if (!g_active_ip[0]) return;
     if ((!uri || !uri[0]) && (!name || !name[0])) return;
 
     enqueue_play_req_t * req = calloc(1, sizeof *req);

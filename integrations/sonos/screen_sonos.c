@@ -162,26 +162,31 @@ static void on_refresh_zone_click(lv_event_t * e) {
 
 static void on_play_pause_click(lv_event_t * e) {
     (void)e;
+    fprintf(stderr, "[screen_sonos] on_play_pause_click\n");
     sonos_play_pause();
 }
 
 static void on_prev_click(lv_event_t * e) {
     (void)e;
+    fprintf(stderr, "[screen_sonos] on_prev_click\n");
     sonos_prev();
 }
 
 static void on_next_click(lv_event_t * e) {
     (void)e;
+    fprintf(stderr, "[screen_sonos] on_next_click\n");
     sonos_next();
 }
 
 static void on_vol_down_click(lv_event_t * e) {
     (void)e;
+    fprintf(stderr, "[screen_sonos] on_vol_down_click\n");
     sonos_volume_down();
 }
 
 static void on_vol_up_click(lv_event_t * e) {
     (void)e;
+    fprintf(stderr, "[screen_sonos] on_vol_up_click\n");
     sonos_volume_up();
 }
 

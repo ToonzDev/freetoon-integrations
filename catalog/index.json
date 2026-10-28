@@ -17,7 +17,7 @@
     {
       "id": "sonos",
       "name": "Sonos Player",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "description": "Native Sonos UPnP / SOAP controller met favorieten, radio en volume.",
       "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/sonos.tgz"
     },
