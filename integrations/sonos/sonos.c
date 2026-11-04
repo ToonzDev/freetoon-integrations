@@ -22,6 +22,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/time.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -634,6 +635,13 @@ static int update_topology(const char * bootstrap_ip) {
         }
         if (g_active_ip[0]) {
             snprintf(settings.sonos_host, sizeof settings.sonos_host, "%s", g_active_ip);
+            mkdir("/mnt/data/integrations/sonos", 0755);
+            FILE * fip = fopen("/mnt/data/integrations/sonos/speaker.ip", "w");
+            if (fip) { fprintf(fip, "%s\n", g_active_ip); fclose(fip); }
+            if (settings.sonos_zone[0]) {
+                FILE * fz = fopen("/mnt/data/integrations/sonos/zone", "w");
+                if (fz) { fprintf(fz, "%s\n", settings.sonos_zone); fclose(fz); }
+            }
         }
     }
     return g_room_count;
@@ -1385,15 +1393,33 @@ void sonos_set_volume(int vol) {
 void sonos_set_zone(const char * zone) {
     if (!zone || !zone[0]) return;
     snprintf(settings.sonos_zone, sizeof settings.sonos_zone, "%s", zone);
-    settings_save();
 
     /* Switch active IP matching this room */
     for (int i = 0; i < g_room_count; i++) {
         if (strcasecmp(g_rooms[i].room, zone) == 0) {
             snprintf(g_active_ip, sizeof g_active_ip, "%s", g_rooms[i].ip);
+            snprintf(settings.sonos_host, sizeof settings.sonos_host, "%s", g_rooms[i].ip);
             break;
         }
     }
+    settings.sonos_enabled = 1;
+    settings_save();
+
+    /* Persist for companion daemon */
+    mkdir("/mnt/data/integrations/sonos", 0755);
+    if (g_active_ip[0]) {
+        FILE * fip = fopen("/mnt/data/integrations/sonos/speaker.ip", "w");
+        if (fip) {
+            fprintf(fip, "%s\n", g_active_ip);
+            fclose(fip);
+        }
+    }
+    FILE * fz = fopen("/mnt/data/integrations/sonos/zone", "w");
+    if (fz) {
+        fprintf(fz, "%s\n", zone);
+        fclose(fz);
+    }
+
     g_force_poll = 1;
 }
 

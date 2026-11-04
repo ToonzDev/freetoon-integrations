@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <pthread.h>
 
 static lv_obj_t * s_modal = NULL;
@@ -225,6 +226,7 @@ static void on_zone_change(lv_event_t * e) {
     lv_dropdown_get_selected_str(dd, buf, sizeof buf);
     if (buf[0]) {
         sonos_set_zone(buf);
+        sonos_save_ui_state();
         trigger_load_items();
     }
 }
@@ -343,7 +345,7 @@ static void sonos_modal_tick_cb(lv_timer_t * t) {
             for (int i = 0; i < s_probe_count; i++) {
                 if (opts[0]) strncat(opts, "\n", sizeof opts - strlen(opts) - 1);
                 strncat(opts, s_probed_rooms[i], sizeof opts - strlen(opts) - 1);
-                if (settings.sonos_zone[0] && strcmp(settings.sonos_zone, s_probed_rooms[i]) == 0)
+                if (settings.sonos_zone[0] && strcasecmp(settings.sonos_zone, s_probed_rooms[i]) == 0)
                     sel_idx = i;
             }
             lv_dropdown_set_options(s_dd_zone, opts);
@@ -527,17 +529,21 @@ static char          s_cur_playlist_id[128] = "";
 static sonos_source_t s_tracks_source = SONOS_SRC_PLAYLISTS;
 
 static void sonos_save_ui_state(void) {
-    FILE * f = fopen("/tmp/sonos_ui_state.json", "w");
+    mkdir("/mnt/data/integrations/sonos", 0755);
+    FILE * f = fopen("/mnt/data/integrations/sonos/ui_state.json", "w");
+    if (!f) f = fopen("/tmp/sonos_ui_state.json", "w");
     if (!f) return;
-    fprintf(f, "{\"source\":%d,\"spot_user\":%d,\"in_pl\":%d,\"pl_name\":\"%s\",\"pl_id\":\"%s\",\"pl_src\":%d}\n",
+    fprintf(f, "{\"source\":%d,\"spot_user\":%d,\"in_pl\":%d,\"pl_name\":\"%s\",\"pl_id\":\"%s\",\"pl_src\":%d,\"zone\":\"%s\"}\n",
             (int)s_cur_source, s_cur_spot_user, s_tracks_view ? 1 : 0,
-            s_cur_playlist_name, s_cur_playlist_id, (int)s_tracks_source);
+            s_cur_playlist_name, s_cur_playlist_id, (int)s_tracks_source,
+            settings.sonos_zone);
     fclose(f);
 }
 
 static int s_restore_pl = 0;
 static void sonos_load_ui_state(void) {
-    FILE * f = fopen("/tmp/sonos_ui_state.json", "r");
+    FILE * f = fopen("/mnt/data/integrations/sonos/ui_state.json", "r");
+    if (!f) f = fopen("/tmp/sonos_ui_state.json", "r");
     if (!f) return;
     char buf[512] = "";
     if (fgets(buf, sizeof buf, f)) {
@@ -555,6 +561,16 @@ static void sonos_load_ui_state(void) {
         if ((p = strstr(buf, "\"pl_id\":\""))) {
             char * end = strchr(p + 9, '"');
             if (end) { size_t n = end - (p + 9); if (n < sizeof id) { memcpy(id, p + 9, n); id[n] = 0; } }
+        }
+        if ((p = strstr(buf, "\"zone\":\""))) {
+            char * end = strchr(p + 8, '"');
+            if (end) {
+                size_t n = end - (p + 8);
+                if (n < sizeof settings.sonos_zone && !settings.sonos_zone[0]) {
+                    memcpy(settings.sonos_zone, p + 8, n);
+                    settings.sonos_zone[n] = 0;
+                }
+            }
         }
         s_cur_source = (sonos_source_t)src;
         s_cur_spot_user = spot;
@@ -1193,7 +1209,7 @@ lv_obj_t * screen_create(void) {
         for (int i = 0; i < n_rooms; i++) {
             if (opts[0]) strncat(opts, "\n", sizeof opts - strlen(opts) - 1);
             strncat(opts, rooms[i], sizeof opts - strlen(opts) - 1);
-            if (settings.sonos_zone[0] && strcmp(settings.sonos_zone, rooms[i]) == 0)
+            if (settings.sonos_zone[0] && strcasecmp(settings.sonos_zone, rooms[i]) == 0)
                 sel_idx = i;
         }
     } else if (settings.sonos_zone[0]) {
