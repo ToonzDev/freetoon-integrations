@@ -358,7 +358,7 @@ static int fetch_range_and_save(const char * ticker, const char * tf, const char
     return pts;
 }
 
-static int fetch_stock_quote(const char * ticker, const char * conf_name, quote_data_t * q) {
+static int fetch_stock_quote_raw(const char * ticker, const char * conf_name, quote_data_t * q) {
     memset(q, 0, sizeof(*q));
     snprintf(q->ticker, sizeof(q->ticker), "%s", ticker);
     snprintf(q->name, sizeof(q->name), "%s", conf_name);
@@ -385,7 +385,7 @@ static int fetch_stock_quote(const char * ticker, const char * conf_name, quote_
     pclose(fp);
     buf[n] = 0;
 
-    if (n < 100) {
+    if (n < 100 || strstr(buf, "\"error\":{\"code\":\"Not Found\"")) {
         free(buf);
         return 0;
     }
@@ -440,6 +440,18 @@ static int fetch_stock_quote(const char * ticker, const char * conf_name, quote_
 
     free(buf);
     return 1;
+}
+
+static int fetch_stock_quote(const char * ticker, const char * conf_name, quote_data_t * q) {
+    int rc = fetch_stock_quote_raw(ticker, conf_name, q);
+    /* Auto-fallback to Amsterdam Euronext (.AS) if ticker has no dot and no ^ */
+    if (!rc && !strchr(ticker, '.') && ticker[0] != '^') {
+        char as_ticker[48];
+        snprintf(as_ticker, sizeof(as_ticker), "%s.AS", ticker);
+        fprintf(stderr, "[stocks_daemon] %s not found, retrying with Euronext suffix %s...\n", ticker, as_ticker);
+        rc = fetch_stock_quote_raw(as_ticker, conf_name, q);
+    }
+    return rc;
 }
 
 static void persist_state(const quote_data_t * q) {
@@ -498,14 +510,33 @@ static void persist_state(const quote_data_t * q) {
 }
 
 static void fetch_requested_timeframe(const char * ticker, const char * tf) {
+    char tk[48];
+    snprintf(tk, sizeof(tk), "%s", ticker);
+    int pts = 0;
     if (!strcmp(tf, "5d")) {
-        fetch_range_and_save(ticker, "5d",  "15m", "5d");
+        pts = fetch_range_and_save(tk, "5d",  "15m", "5d");
+        if (pts <= 0 && !strchr(tk, '.') && tk[0] != '^') {
+            snprintf(tk, sizeof(tk), "%s.AS", ticker);
+            fetch_range_and_save(tk, "5d",  "15m", "5d");
+        }
     } else if (!strcmp(tf, "1mo")) {
-        fetch_range_and_save(ticker, "1mo", "1d",  "1mo");
+        pts = fetch_range_and_save(tk, "1mo", "1d",  "1mo");
+        if (pts <= 0 && !strchr(tk, '.') && tk[0] != '^') {
+            snprintf(tk, sizeof(tk), "%s.AS", ticker);
+            fetch_range_and_save(tk, "1mo", "1d",  "1mo");
+        }
     } else if (!strcmp(tf, "6mo")) {
-        fetch_range_and_save(ticker, "6mo", "1d",  "6mo");
+        pts = fetch_range_and_save(tk, "6mo", "1d",  "6mo");
+        if (pts <= 0 && !strchr(tk, '.') && tk[0] != '^') {
+            snprintf(tk, sizeof(tk), "%s.AS", ticker);
+            fetch_range_and_save(tk, "6mo", "1d",  "6mo");
+        }
     } else if (!strcmp(tf, "1y")) {
-        fetch_range_and_save(ticker, "1y",  "1d",  "1y");
+        pts = fetch_range_and_save(tk, "1y",  "1d",  "1y");
+        if (pts <= 0 && !strchr(tk, '.') && tk[0] != '^') {
+            snprintf(tk, sizeof(tk), "%s.AS", ticker);
+            fetch_range_and_save(tk, "1y",  "1d",  "1y");
+        }
     }
 }
 

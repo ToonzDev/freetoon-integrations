@@ -704,9 +704,33 @@ static void on_picker_custom_action(int add_to_fav) {
     cleaned[j] = 0;
     if (!cleaned[0]) return;
 
-    if (add_to_fav && s_fav_count < MAX_FAVS && !is_in_favs(cleaned)) {
-        snprintf(s_favs[s_fav_count].ticker, sizeof(s_favs[0].ticker), "%s", cleaned);
-        snprintf(s_favs[s_fav_count].name, sizeof(s_favs[0].name), "%s", cleaned);
+    /* Smart Euronext Amsterdam (.AS) resolution if ticker has no dot and no ^ */
+    char resolved_ticker[32];
+    char resolved_name[48];
+    snprintf(resolved_ticker, sizeof(resolved_ticker), "%s", cleaned);
+    snprintf(resolved_name, sizeof(resolved_name), "%s", cleaned);
+
+    if (!strchr(cleaned, '.') && cleaned[0] != '^') {
+        for (size_t i = 0; i < NUM_ALL_PRESETS; i++) {
+            const char * dot = strchr(s_all_presets[i].ticker, '.');
+            if (dot) {
+                size_t pfx = dot - s_all_presets[i].ticker;
+                if (strlen(cleaned) == pfx && strncasecmp(cleaned, s_all_presets[i].ticker, pfx) == 0) {
+                    snprintf(resolved_ticker, sizeof(resolved_ticker), "%s", s_all_presets[i].ticker);
+                    snprintf(resolved_name, sizeof(resolved_name), "%s", s_all_presets[i].name);
+                    break;
+                }
+            } else if (strcasecmp(cleaned, s_all_presets[i].name) == 0) {
+                snprintf(resolved_ticker, sizeof(resolved_ticker), "%s", s_all_presets[i].ticker);
+                snprintf(resolved_name, sizeof(resolved_name), "%s", s_all_presets[i].name);
+                break;
+            }
+        }
+    }
+
+    if (add_to_fav && s_fav_count < MAX_FAVS && !is_in_favs(resolved_ticker)) {
+        snprintf(s_favs[s_fav_count].ticker, sizeof(s_favs[0].ticker), "%s", resolved_ticker);
+        snprintf(s_favs[s_fav_count].name, sizeof(s_favs[0].name), "%s", resolved_name);
         s_fav_count++;
         save_config();
         rebuild_fav_bar();
@@ -714,7 +738,7 @@ static void on_picker_custom_action(int add_to_fav) {
         render_picker_grid();
     }
 
-    save_selected_ticker(cleaned, cleaned);
+    save_selected_ticker(resolved_ticker, resolved_name);
     close_picker_modal();
     load_state_and_refresh();
 }
@@ -1033,17 +1057,17 @@ lv_obj_t * screen_create(void) {
     /* ================================================================= */
     /* ROW 3: Secondary Range Info (Left) + Timeframe Chips (Right)      */
     /* ================================================================= */
-    int row3_y = SY(116);
+    int row3_y = SY(114);
 
     s_lbl_info = lv_label_create(s_modal);
     lv_label_set_text(s_lbl_info, "...");
     lv_obj_set_style_text_font(s_lbl_info, SF(13), 0);
     lv_obj_set_style_text_color(s_lbl_info, lv_color_hex(THEME_TEXT_DIM), 0);
-    lv_obj_set_pos(s_lbl_info, SX(16), row3_y + SY(4));
+    lv_obj_set_pos(s_lbl_info, SX(16), row3_y + SY(8));
 
-    /* Timeframe Selector Chips Row (1D, 5D, 1M, 6M, 1J) */
-    int tf_chip_w = SX(48);
-    int tf_chip_h = SY(28);
+    /* Timeframe Selector Chips Row (1D, 5D, 1M, 6M, 1J) — Extra Large for Easy Touch */
+    int tf_chip_w = SX(64);
+    int tf_chip_h = SY(38);
     int tf_gap = SX(6);
     int tf_start_x = LV_HOR_RES - SX(16) - 5 * (tf_chip_w + tf_gap);
 
@@ -1052,13 +1076,13 @@ lv_obj_t * screen_create(void) {
         lv_obj_set_size(s_tf_btns[i], tf_chip_w, tf_chip_h);
         lv_obj_set_pos(s_tf_btns[i], tf_start_x + i * (tf_chip_w + tf_gap), row3_y);
         lv_obj_set_style_bg_color(s_tf_btns[i], lv_color_hex(THEME_BTN_BG), 0);
-        lv_obj_set_style_radius(s_tf_btns[i], 6, 0);
+        lv_obj_set_style_radius(s_tf_btns[i], 8, 0);
         lv_obj_set_style_pad_all(s_tf_btns[i], 0, 0);
         lv_obj_add_event_cb(s_tf_btns[i], on_tf_click, LV_EVENT_CLICKED, (void *)(intptr_t)i);
 
         lv_obj_t * l = lv_label_create(s_tf_btns[i]);
         lv_label_set_text(l, s_tf_labels[i]);
-        lv_obj_set_style_text_font(l, SF(13), 0);
+        lv_obj_set_style_text_font(l, SF(16), 0);
         lv_obj_set_style_text_color(l, lv_color_hex(THEME_TEXT_HI), 0);
         lv_obj_center(l);
     }
@@ -1066,8 +1090,8 @@ lv_obj_t * screen_create(void) {
     /* ================================================================= */
     /* ROW 4: Chart + Dedicated Clear Y-Axis Values                      */
     /* ================================================================= */
-    int chart_y = row3_y + SY(32);
-    int chart_h = LV_VER_RES - chart_y - SY(16);
+    int chart_y = row3_y + SY(44);
+    int chart_h = LV_VER_RES - chart_y - SY(14);
     int y_axis_w = SX(74);
 
     /* 5 Y-Axis Labels aligned with the 5 horizontal grid lines */
