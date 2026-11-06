@@ -121,9 +121,10 @@ static int s_cur_tf = 0; /* default: 1D */
 
 static lv_obj_t * s_chart = NULL;
 static lv_chart_series_t * s_series = NULL;
-static lv_obj_t * s_lbl_y[5]; /* 5 clean Y-axis values: Max, 75%, Mid, 25%, Min */
-static lv_obj_t * s_lbl_date_start = NULL;
-static lv_obj_t * s_lbl_date_end = NULL;
+static lv_obj_t * s_lbl_y[5]; /* 5 clean Y-axis values matching 5 grid lines */
+static lv_obj_t * s_lbl_x[5]; /* 5 clean X-axis time/date labels under the chart */
+static const char * const s_nl_days[7] = { "zo", "ma", "di", "wo", "do", "vr", "za" };
+static const char * const s_nl_months[12] = { "jan", "feb", "mrt", "apr", "mei", "jun", "jul", "aug", "sep", "okt", "nov", "dec" };
 
 static char s_cur_ticker[32] = "^AEX";
 static char s_cur_name[64] = "AEX-Index";
@@ -314,6 +315,12 @@ static void on_modal_deleted(lv_event_t * e) {
         s_poll_timer = NULL;
     }
     s_modal = NULL;
+    s_chart = NULL;
+    s_series = NULL;
+    for (int i = 0; i < 5; i++) {
+        s_lbl_y[i] = NULL;
+        s_lbl_x[i] = NULL;
+    }
 }
 
 /* Parse json string field */
@@ -367,6 +374,69 @@ static void format_price_num(double val, char * out, size_t outsz) {
         snprintf(out, outsz, "%ld.%03ld,%02d", thousands, hundreds, dec_part);
     } else {
         snprintf(out, outsz, "%ld,%02d", int_part, dec_part);
+    }
+}
+
+/* Calculate clean quantized nice-step Y-axis bounds (like screen_stats in FreeToon) */
+static void calculate_nice_stock_range(double min_p, double max_p, double * out_bottom, double * out_step, double * out_top) {
+    if (max_p - min_p < 0.001) {
+        max_p = min_p + 1.0;
+    }
+    double raw_span = max_p - min_p;
+    raw_span *= 1.05; /* 5% headroom so data points do not touch chart borders */
+    double raw_step = raw_span / 4.0;
+
+    double exponent = floor(log10(raw_step));
+    double mag = pow(10.0, exponent);
+    double frac = raw_step / mag;
+
+    const double nice_fracs[] = { 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 7.5, 8.0, 10.0, 12.5, 15.0, 20.0, 25.0 };
+    int num_fracs = (int)(sizeof(nice_fracs) / sizeof(nice_fracs[0]));
+
+    double step = nice_fracs[0] * mag;
+    double bottom = 0, top = 0;
+
+    for (int i = 0; i < num_fracs; i++) {
+        if (nice_fracs[i] < frac && i < num_fracs - 1) continue;
+        step = nice_fracs[i] * mag;
+
+        bottom = floor(min_p / step) * step;
+        top = bottom + 4.0 * step;
+
+        if (bottom <= min_p && top >= max_p) {
+            break;
+        }
+        if ((bottom - step) <= min_p && ((bottom - step) + 4.0 * step) >= max_p) {
+            bottom -= step;
+            top = bottom + 4.0 * step;
+            break;
+        }
+    }
+
+    *out_bottom = bottom;
+    *out_step = step;
+    *out_top = top;
+}
+
+/* Format clean tick with smart decimal rounding based on step */
+static void format_nice_tick(double val, double step, char * out, size_t outsz) {
+    int has_cents = (step < 1.0) || (fabs(step - floor(step + 0.0001)) > 0.005);
+    long int_part = (long)floor(val + 0.0001);
+
+    if (!has_cents) {
+        if (int_part >= 1000) {
+            snprintf(out, outsz, "%ld.%03ld", int_part / 1000, int_part % 1000);
+        } else {
+            snprintf(out, outsz, "%ld", int_part);
+        }
+    } else {
+        int dec = (int)(fabs(val - int_part) * 100.0 + 0.5);
+        if (dec >= 100) { int_part++; dec = 0; }
+        if (int_part >= 1000) {
+            snprintf(out, outsz, "%ld.%03ld,%02d", int_part / 1000, int_part % 1000, dec);
+        } else {
+            snprintf(out, outsz, "%ld,%02d", int_part, dec);
+        }
     }
 }
 
@@ -504,17 +574,14 @@ static void load_state_and_refresh(void) {
     lv_chart_set_point_count(s_chart, (pt_count > 10) ? pt_count : 10);
 
     if (pt_count >= 2) {
-        double span = max_p - min_p;
-        if (span < 0.01) span = 1.0;
-        double pad = span * 0.05;
-        double chart_min = min_p - pad;
-        double chart_max = max_p + pad;
+        double nice_bottom = 0, nice_step = 0, nice_top = 0;
+        calculate_nice_stock_range(min_p, max_p, &nice_bottom, &nice_step, &nice_top);
 
         /* Range in integer coordinates 0..1000 */
         lv_chart_set_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 1000);
 
         for (int i = 0; i < pt_count; i++) {
-            int norm = (int)(((prices[i] - chart_min) / (chart_max - chart_min)) * 1000.0);
+            int norm = (int)(((prices[i] - nice_bottom) / (nice_top - nice_bottom)) * 1000.0);
             if (norm < 0) norm = 0;
             if (norm > 1000) norm = 1000;
             lv_chart_set_next_value(s_chart, s_series, (lv_coord_t)norm);
@@ -524,37 +591,49 @@ static void load_state_and_refresh(void) {
         uint32_t line_color = (prices[pt_count - 1] >= prices[0]) ? 0x16a34a : 0xdc2626;
         lv_chart_set_series_color(s_chart, s_series, lv_color_hex(line_color));
 
-        /* 5 Clean Y-Axis Scale Values: 100%, 75%, 50%, 25%, 0% */
-        double y_levels[5];
-        y_levels[0] = max_p;
-        y_levels[1] = min_p + span * 0.75;
-        y_levels[2] = min_p + span * 0.50;
-        y_levels[3] = min_p + span * 0.25;
-        y_levels[4] = min_p;
-
+        /* 5 Clean Y-Axis Scale Values matching the 5 grid lines exactly (top to bottom) */
         for (int y = 0; y < 5; y++) {
-            char y_buf[32];
-            format_price_num(y_levels[y], y_buf, sizeof(y_buf));
+            if (!s_lbl_y[y]) continue;
+            double v = nice_top - (double)y * nice_step;
+            char y_buf[48];
+            format_nice_tick(v, nice_step, y_buf, sizeof(y_buf));
             lv_label_set_text(s_lbl_y[y], y_buf);
         }
 
-        /* Start and End date/time labels */
-        if (s_lbl_date_start && s_lbl_date_end && timestamps[0] > 0) {
-            time_t t0 = timestamps[0];
-            time_t t1 = timestamps[pt_count - 1];
-            struct tm tm0, tm1;
-            localtime_r(&t0, &tm0);
-            localtime_r(&t1, &tm1);
-            char b0[32], b1[32];
-            if (s_cur_tf == 0) {
-                strftime(b0, sizeof(b0), "%H:%M", &tm0);
-                strftime(b1, sizeof(b1), "%H:%M", &tm1);
-            } else {
-                strftime(b0, sizeof(b0), "%d-%m", &tm0);
-                strftime(b1, sizeof(b1), "%d-%m", &tm1);
+        /* 5 Clean X-Axis Time/Date Labels across the time range */
+        for (int k = 0; k < 5; k++) {
+            if (!s_lbl_x[k]) continue;
+            if (timestamps[0] <= 0) {
+                lv_label_set_text(s_lbl_x[k], "");
+                continue;
             }
-            lv_label_set_text(s_lbl_date_start, b0);
-            lv_label_set_text(s_lbl_date_end, b1);
+            int idx = (k * (pt_count - 1)) / 4;
+            time_t t = timestamps[idx];
+            struct tm tm_pt;
+            localtime_r(&t, &tm_pt);
+            char xbuf[32];
+
+            if (s_cur_tf == 0) {
+                /* 1D: Hour:Minute (e.g. 09:05, 11:15, 13:30, ...) */
+                strftime(xbuf, sizeof(xbuf), "%H:%M", &tm_pt);
+            } else if (s_cur_tf == 1) {
+                /* 5D: Day name + date (e.g. ma 3, di 4, wo 5, ...) */
+                snprintf(xbuf, sizeof(xbuf), "%s %d",
+                         s_nl_days[tm_pt.tm_wday % 7], tm_pt.tm_mday);
+            } else if (s_cur_tf == 2) {
+                /* 1M: Day + month (e.g. 10 okt, 17 okt, ...) */
+                snprintf(xbuf, sizeof(xbuf), "%d %s",
+                         tm_pt.tm_mday, s_nl_months[tm_pt.tm_mon % 12]);
+            } else if (s_cur_tf == 3) {
+                /* 6M: Month name (e.g. mei, jul, sep, nov) */
+                snprintf(xbuf, sizeof(xbuf), "%s",
+                         s_nl_months[tm_pt.tm_mon % 12]);
+            } else {
+                /* 1J: Month + short year (e.g. nov '25, feb '26, ...) */
+                snprintf(xbuf, sizeof(xbuf), "%s '%02d",
+                         s_nl_months[tm_pt.tm_mon % 12], tm_pt.tm_year % 100);
+            }
+            lv_label_set_text(s_lbl_x[k], xbuf);
         }
     } else {
         lv_chart_set_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
@@ -562,10 +641,11 @@ static void load_state_and_refresh(void) {
             lv_chart_set_next_value(s_chart, s_series, 50);
         }
         for (int y = 0; y < 5; y++) {
-            lv_label_set_text(s_lbl_y[y], "");
+            if (s_lbl_y[y]) lv_label_set_text(s_lbl_y[y], "");
         }
-        if (s_lbl_date_start) lv_label_set_text(s_lbl_date_start, "");
-        if (s_lbl_date_end) lv_label_set_text(s_lbl_date_end, "");
+        for (int k = 0; k < 5; k++) {
+            if (s_lbl_x[k]) lv_label_set_text(s_lbl_x[k], "");
+        }
     }
     lv_chart_refresh(s_chart);
 }
@@ -1088,10 +1168,11 @@ lv_obj_t * screen_create(void) {
     }
 
     /* ================================================================= */
-    /* ROW 4: Chart + Dedicated Clear Y-Axis Values                      */
+    /* ROW 4: Chart + Dedicated Clear Y-Axis Values & X-Axis Labels      */
     /* ================================================================= */
     int chart_y = row3_y + SY(44);
-    int chart_h = LV_VER_RES - chart_y - SY(14);
+    int x_axis_h = SY(22);
+    int chart_h = LV_VER_RES - chart_y - x_axis_h - SY(10);
     int y_axis_w = SX(74);
 
     /* 5 Y-Axis Labels aligned with the 5 horizontal grid lines */
@@ -1119,7 +1200,7 @@ lv_obj_t * screen_create(void) {
     lv_obj_set_size(s_chart, chart_w, chart_h);
     lv_obj_set_pos(s_chart, chart_x, chart_y);
     lv_chart_set_type(s_chart, LV_CHART_TYPE_LINE);
-    lv_chart_set_div_line_count(s_chart, 5, 8);
+    lv_chart_set_div_line_count(s_chart, 5, 5);
     lv_obj_set_style_bg_color(s_chart, lv_color_hex(THEME_CARD_BG), 0);
     lv_obj_set_style_border_color(s_chart, lv_color_hex(THEME_BORDER), 0);
     lv_obj_set_style_border_width(s_chart, 1, 0);
@@ -1129,18 +1210,28 @@ lv_obj_t * screen_create(void) {
 
     s_series = lv_chart_add_series(s_chart, lv_color_hex(0x16a34a), LV_CHART_AXIS_PRIMARY_Y);
 
-    /* Date/Time Labels under chart */
-    s_lbl_date_start = lv_label_create(s_modal);
-    lv_label_set_text(s_lbl_date_start, "");
-    lv_obj_set_style_text_font(s_lbl_date_start, SF(11), 0);
-    lv_obj_set_style_text_color(s_lbl_date_start, lv_color_hex(THEME_TEXT_DIM), 0);
-    lv_obj_set_pos(s_lbl_date_start, chart_x + SX(4), chart_y + chart_h - SY(14));
+    /* 5 Proper X-Axis Date/Time Labels under the chart */
+    int x_label_y = chart_y + chart_h + SY(4);
+    int lbl_w = SX(80);
+    for (int k = 0; k < 5; k++) {
+        s_lbl_x[k] = lv_label_create(s_modal);
+        lv_label_set_text(s_lbl_x[k], "");
+        lv_obj_set_style_text_font(s_lbl_x[k], SF(12), 0);
+        lv_obj_set_style_text_color(s_lbl_x[k], lv_color_hex(THEME_TEXT_DIM), 0);
+        lv_obj_set_size(s_lbl_x[k], lbl_w, SY(18));
 
-    s_lbl_date_end = lv_label_create(s_modal);
-    lv_label_set_text(s_lbl_date_end, "");
-    lv_obj_set_style_text_font(s_lbl_date_end, SF(11), 0);
-    lv_obj_set_style_text_color(s_lbl_date_end, lv_color_hex(THEME_TEXT_DIM), 0);
-    lv_obj_align_to(s_lbl_date_end, s_chart, LV_ALIGN_OUT_BOTTOM_RIGHT, SX(-6), SY(-14));
+        if (k == 0) {
+            lv_obj_set_style_text_align(s_lbl_x[k], LV_TEXT_ALIGN_LEFT, 0);
+            lv_obj_set_pos(s_lbl_x[k], chart_x + SX(4), x_label_y);
+        } else if (k == 4) {
+            lv_obj_set_style_text_align(s_lbl_x[k], LV_TEXT_ALIGN_RIGHT, 0);
+            lv_obj_set_pos(s_lbl_x[k], chart_x + chart_w - lbl_w - SX(4), x_label_y);
+        } else {
+            lv_obj_set_style_text_align(s_lbl_x[k], LV_TEXT_ALIGN_CENTER, 0);
+            int cx = chart_x + (int)((double)chart_w * (k / 4.0));
+            lv_obj_set_pos(s_lbl_x[k], cx - (lbl_w / 2), x_label_y);
+        }
+    }
 
     /* Load state & render */
     load_state_and_refresh();

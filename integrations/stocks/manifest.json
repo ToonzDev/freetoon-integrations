@@ -1,7 +1,7 @@
 {
   "id": "stocks",
   "name": "AEX & Aandelen",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "binary": "freetoon-app-stocks",
   "args": [],
   "service_id": "stocks",

@@ -17,7 +17,7 @@
     {
       "id": "stocks",
       "name": "AEX & Aandelen",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "description": "Actuele koersen van AEX en aandelen met grafiek en aandeelselectie.",
       "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/stocks.tgz"
     },
