@@ -1,0 +1,24 @@
+{
+  "id": "stocks",
+  "name": "AEX & Aandelen",
+  "version": "1.0.0",
+  "binary": "freetoon-app-stocks",
+  "args": [],
+  "service_id": "stocks",
+  "tile": {
+    "title": "AEX",
+    "color": "0x16a34a",
+    "icon": "chart",
+    "value_field": "price",
+    "value_unit": "",
+    "subtitle_field": "change",
+    "subtitle_unit": ""
+  },
+  "detail_screen": {
+    "type": "plugin",
+    "library": "stocks_ui.so",
+    "entry": "screen_create"
+  },
+  "description": "Live koersen van de AEX en aandelen met interactieve grafiek en selectie.",
+  "license": "MIT"
+}
