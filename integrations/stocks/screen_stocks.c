@@ -3,11 +3,16 @@
  *
  * Full-screen stock quote and interactive chart viewer.
  * Features:
- *   - Live quote, day change percentage and points, day range, 52-week high/low.
- *   - Interactive multi-timeframe chart: 1D, 5D, 1M, 6M, 1Y.
- *   - Quick-switch preset chips for popular Dutch stocks (AEX, ASML, Shell, ING, etc.).
- *   - Comprehensive Stock Picker modal with Dutch & Global stocks/indices and
- *     on-screen keyboard for any custom ticker symbol.
+ *   - Live quote or closing rate, day change percentage and points, day range, 52-week high/low.
+ *   - Interactive multi-timeframe chart: 1D, 5D, 1M, 6M, 1J.
+ *   - Dedicated, non-overlapping button bars:
+ *       * Row 2: Favorites stock chips with dynamic configuration.
+ *       * Row 3: Range metadata + timeframe selector chips.
+ *       * Row 4: Dedicated, visible Y-axis values with 5 clean price levels.
+ *   - Configurable favorites on the button row: add/remove any AEX stock directly
+ *     from the picker modal.
+ *   - Instant cached quote & closing rate display (no "Ophalen..." delays for cached tickers).
+ *   - Background 400ms UI timer to seamlessly refresh when daemon finishes fetching.
  */
 
 #define _GNU_SOURCE
@@ -32,7 +37,7 @@
 #define TRIG_PATH       BASE_DIR "/reload.trig"
 
 #define MAX_CHART_PTS   256
-#define MAX_FAVS        8
+#define MAX_FAVS        12
 
 typedef struct {
     char ticker[32];
@@ -44,34 +49,51 @@ static const stock_preset_t s_all_presets[] = {
     { "^AEX",        "AEX-Index" },
     { "^AMX",        "AMX Midcap" },
     { "^ASCX",       "AScX Smallcap" },
-    /* Nederlandse AEX Aandelen */
-    { "ASML.AS",     "ASML" },
-    { "SHELL.AS",    "Shell" },
-    { "INGA.AS",     "ING Groep" },
+
+    /* De 25 AEX Hoofdfonds Aandelen */
+    { "ABN.AS",      "ABN AMRO" },
+    { "ADYEN.AS",    "Adyen" },
+    { "AGN.AS",      "Aegon" },
     { "AD.AS",       "Ahold Delhaize" },
+    { "AKZA.AS",     "AkzoNobel" },
+    { "ASM.AS",      "ASM International" },
+    { "ASML.AS",     "ASML" },
+    { "ASRNL.AS",    "ASR Nederland" },
+    { "BESI.AS",     "Besi" },
+    { "DSFIR.AS",    "DSM-Firmenich" },
+    { "EXO.AS",      "Exor" },
+    { "GLPG.AS",     "Galapagos" },
     { "HEIA.AS",     "Heineken" },
-    { "PHIA.AS",     "Philips" },
-    { "UNA.AS",      "Unilever" },
+    { "IMCD.AS",     "IMCD" },
+    { "INGA.AS",     "ING Groep" },
+    { "JDEP.AS",     "JDE Peet's" },
+    { "TKWY.AS",     "Just Eat Takeaway" },
     { "KPN.AS",      "KPN" },
     { "NN.AS",       "NN Group" },
-    { "BESI.AS",     "Besi" },
-    { "ASM.AS",      "ASM International" },
-    { "WKL.AS",      "Wolters Kluwer" },
-    { "DSFIR.AS",    "DSM-Firmenich" },
+    { "PHIA.AS",     "Philips" },
     { "PRX.AS",      "Prosus" },
-    { "AGN.AS",      "Aegon" },
-    { "ABN.AS",      "ABN AMRO" },
-    { "TKWY.AS",     "Just Eat Takeaway" },
+    { "RAND.AS",     "Randstad" },
+    { "REN.AS",      "RELX" },
+    { "SHELL.AS",    "Shell" },
+    { "UMG.AS",      "Universal Music" },
+    { "UNA.AS",      "Unilever" },
+    { "WKL.AS",      "Wolters Kluwer" },
+
+    /* Populaire AMX / Lokale Fondsen */
     { "ARCAD.AS",    "Arcadis" },
     { "FLOW.AS",     "Flow Traders" },
-    /* Wereldwijd */
+    { "ALFEN.AS",    "Alfen" },
+    { "CORB.AS",     "Corbion" },
+
+    /* Wereldwijd & Tech */
     { "^GSPC",       "S&P 500" },
     { "^IXIC",       "Nasdaq 100" },
     { "^DJI",        "Dow Jones" },
     { "^GDAXI",      "DAX 40" },
+    { "NVDA",        "Nvidia" },
+    { "ASML",        "ASML (US)" },
     { "AAPL",        "Apple" },
     { "MSFT",        "Microsoft" },
-    { "NVDA",        "Nvidia" },
     { "TSLA",        "Tesla" },
     { "GOOGL",       "Alphabet" },
     { "AMZN",        "Amazon" },
@@ -88,6 +110,7 @@ static lv_obj_t * s_badge_chg = NULL;
 static lv_obj_t * s_lbl_chg = NULL;
 static lv_obj_t * s_lbl_info = NULL;
 
+static lv_obj_t * s_fav_cont = NULL;
 static lv_obj_t * s_fav_btns[MAX_FAVS];
 static lv_obj_t * s_btn_more = NULL;
 
@@ -98,20 +121,29 @@ static int s_cur_tf = 0; /* default: 1D */
 
 static lv_obj_t * s_chart = NULL;
 static lv_chart_series_t * s_series = NULL;
-static lv_obj_t * s_lbl_hi = NULL;
-static lv_obj_t * s_lbl_lo = NULL;
+static lv_obj_t * s_lbl_y[5]; /* 5 clean Y-axis values: Max, 75%, Mid, 25%, Min */
+static lv_obj_t * s_lbl_date_start = NULL;
+static lv_obj_t * s_lbl_date_end = NULL;
 
 static char s_cur_ticker[32] = "^AEX";
 static char s_cur_name[64] = "AEX-Index";
 
+/* Timer for background update check */
+static lv_timer_t * s_poll_timer = NULL;
+static long s_last_rendered_mtime = 0;
+
 /* Modal picker elements */
 static lv_obj_t * s_picker_modal = NULL;
+static lv_obj_t * s_picker_favs_cont = NULL;
+static lv_obj_t * s_picker_grid_cont = NULL;
 static lv_obj_t * s_picker_ta = NULL;
 static lv_obj_t * s_picker_kb = NULL;
 
 static void load_state_and_refresh(void);
 static void open_picker_modal(void);
 static void close_picker_modal(void);
+static void rebuild_fav_bar(void);
+static void save_config(void);
 
 static void make_safe_ticker(const char * src, char * dst, size_t maxlen) {
     size_t j = 0;
@@ -126,6 +158,13 @@ static void make_safe_ticker(const char * src, char * dst, size_t maxlen) {
         }
     }
     dst[j] = 0;
+}
+
+static int is_in_favs(const char * ticker) {
+    for (int i = 0; i < s_fav_count; i++) {
+        if (strcasecmp(s_favs[i].ticker, ticker) == 0) return 1;
+    }
+    return 0;
 }
 
 static void read_config(void) {
@@ -146,7 +185,9 @@ static void read_config(void) {
         snprintf(s_favs[4].name, sizeof(s_favs[4].name), "Ahold");
         snprintf(s_favs[5].ticker, sizeof(s_favs[5].ticker), "HEIA.AS");
         snprintf(s_favs[5].name, sizeof(s_favs[5].name), "Heineken");
-        s_fav_count = 6;
+        snprintf(s_favs[6].ticker, sizeof(s_favs[6].ticker), "ADYEN.AS");
+        snprintf(s_favs[6].name, sizeof(s_favs[6].name), "Adyen");
+        s_fav_count = 7;
         return;
     }
 
@@ -159,6 +200,10 @@ static void read_config(void) {
             snprintf(s_cur_ticker, sizeof(s_cur_ticker), "%s", line + 7);
         } else if (strncmp(line, "NAME=", 5) == 0) {
             snprintf(s_cur_name, sizeof(s_cur_name), "%s", line + 5);
+        } else if (strncmp(line, "TIMEFRAME=", 10) == 0) {
+            for (int k = 0; k < 5; k++) {
+                if (strcmp(line + 10, s_tf_keys[k]) == 0) { s_cur_tf = k; break; }
+            }
         } else if (strncmp(line, "FAV=", 4) == 0 && s_fav_count < MAX_FAVS) {
             char * v = line + 4;
             char * comma = strchr(v, ',');
@@ -192,11 +237,7 @@ static void read_config(void) {
     }
 }
 
-static void save_selected_ticker(const char * ticker, const char * name) {
-    snprintf(s_cur_ticker, sizeof(s_cur_ticker), "%s", ticker);
-    snprintf(s_cur_name, sizeof(s_cur_name), "%s", name);
-
-    /* Update stocks.conf */
+static void save_config(void) {
     mkdir(BASE_DIR, 0755);
     FILE * f = fopen(CONF_PATH, "w");
     if (f) {
@@ -208,6 +249,12 @@ static void save_selected_ticker(const char * ticker, const char * name) {
         }
         fclose(f);
     }
+}
+
+static void save_selected_ticker(const char * ticker, const char * name) {
+    snprintf(s_cur_ticker, sizeof(s_cur_ticker), "%s", ticker);
+    snprintf(s_cur_name, sizeof(s_cur_name), "%s", name);
+    save_config();
 
     /* Signal daemon for immediate refresh */
     FILE * trg = fopen(TRIG_PATH, "w");
@@ -244,6 +291,13 @@ static void on_tf_click(lv_event_t * e) {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
     if (idx >= 0 && idx < 5) {
         s_cur_tf = idx;
+        save_config();
+        /* Signal daemon if timeframe changed */
+        FILE * trg = fopen(TRIG_PATH, "w");
+        if (trg) {
+            fprintf(trg, "1\n");
+            fclose(trg);
+        }
         load_state_and_refresh();
     }
 }
@@ -255,6 +309,10 @@ static void on_more_click(lv_event_t * e) {
 
 static void on_modal_deleted(lv_event_t * e) {
     (void)e;
+    if (s_poll_timer) {
+        lv_timer_del(s_poll_timer);
+        s_poll_timer = NULL;
+    }
     s_modal = NULL;
 }
 
@@ -297,6 +355,21 @@ static int extract_json_num(const char * json, const char * key, double * out) {
     return 0;
 }
 
+/* Format clean price in Dutch notation */
+static void format_price_num(double val, char * out, size_t outsz) {
+    long int_part = (long)fabs(val);
+    int dec_part = (int)(fabs(val - int_part) * 100.0 + 0.5);
+    if (dec_part >= 100) { int_part++; dec_part = 0; }
+
+    if (int_part >= 1000) {
+        long thousands = int_part / 1000;
+        long hundreds = int_part % 1000;
+        snprintf(out, outsz, "%ld.%03ld,%02d", thousands, hundreds, dec_part);
+    } else {
+        snprintf(out, outsz, "%ld,%02d", int_part, dec_part);
+    }
+}
+
 static void load_state_and_refresh(void) {
     if (!s_modal) return;
 
@@ -314,30 +387,60 @@ static void load_state_and_refresh(void) {
         lv_obj_set_style_bg_color(s_tf_btns[i], lv_color_hex(is_active ? THEME_BTN_ACCENT : THEME_BTN_BG), 0);
     }
 
-    /* Read state.json */
+    /* 1. Try to read active state.json or cached state_<safe_ticker>.json */
+    char safe_tk[64];
+    make_safe_ticker(s_cur_ticker, safe_tk, sizeof(safe_tk));
+
     char buf[4096];
-    FILE * f = fopen(STATE_PATH, "r");
     char val[32] = "", sub[32] = "", name[64] = "", ticker[32] = "";
     double change = 0.0, day_hi = 0.0, day_lo = 0.0, hi_52w = 0.0, lo_52w = 0.0;
+    int have_data = 0;
 
+    /* Check state.json */
+    FILE * f = fopen(STATE_PATH, "r");
     if (f) {
         size_t n = fread(buf, 1, sizeof(buf) - 1, f);
         buf[n] = 0;
         fclose(f);
 
         extract_json_str(buf, "ticker", ticker, sizeof(ticker));
-        extract_json_str(buf, "name", name, sizeof(name));
-        extract_json_str(buf, "value", val, sizeof(val));
-        extract_json_str(buf, "subtitle", sub, sizeof(sub));
-        extract_json_num(buf, "change", &change);
-        extract_json_num(buf, "day_high", &day_hi);
-        extract_json_num(buf, "day_low", &day_lo);
-        extract_json_num(buf, "high_52w", &hi_52w);
-        extract_json_num(buf, "low_52w", &lo_52w);
+        if (strcmp(ticker, s_cur_ticker) == 0) {
+            extract_json_str(buf, "name", name, sizeof(name));
+            extract_json_str(buf, "value", val, sizeof(val));
+            extract_json_str(buf, "subtitle", sub, sizeof(sub));
+            extract_json_num(buf, "change", &change);
+            extract_json_num(buf, "day_high", &day_hi);
+            extract_json_num(buf, "day_low", &day_lo);
+            extract_json_num(buf, "high_52w", &hi_52w);
+            extract_json_num(buf, "low_52w", &lo_52w);
+            have_data = 1;
+        }
     }
 
-    /* If state.json is for current ticker, display it; otherwise show loading */
-    if (ticker[0] && strcmp(ticker, s_cur_ticker) == 0) {
+    /* If state.json is not for current ticker, look for per-ticker cache */
+    if (!have_data) {
+        char cache_path[256];
+        snprintf(cache_path, sizeof(cache_path), "%s/state_%s.json", BASE_DIR, safe_tk);
+        FILE * fc = fopen(cache_path, "r");
+        if (fc) {
+            size_t n = fread(buf, 1, sizeof(buf) - 1, fc);
+            buf[n] = 0;
+            fclose(fc);
+
+            extract_json_str(buf, "ticker", ticker, sizeof(ticker));
+            extract_json_str(buf, "name", name, sizeof(name));
+            extract_json_str(buf, "value", val, sizeof(val));
+            extract_json_str(buf, "subtitle", sub, sizeof(sub));
+            extract_json_num(buf, "change", &change);
+            extract_json_num(buf, "day_high", &day_hi);
+            extract_json_num(buf, "day_low", &day_lo);
+            extract_json_num(buf, "high_52w", &hi_52w);
+            extract_json_num(buf, "low_52w", &lo_52w);
+            have_data = 1;
+        }
+    }
+
+    if (have_data) {
         char title_buf[96];
         snprintf(title_buf, sizeof(title_buf), "%s (%s)", name[0] ? name : s_cur_name, s_cur_ticker);
         lv_label_set_text(s_lbl_title, title_buf);
@@ -349,8 +452,13 @@ static void load_state_and_refresh(void) {
 
         char info_buf[128];
         if (day_hi > 0.01 && hi_52w > 0.01) {
-            snprintf(info_buf, sizeof(info_buf), "Dag: %.2f - %.2f   |   52w: %.2f - %.2f",
-                     day_lo, day_hi, lo_52w, hi_52w);
+            char dhi[24], dlo[24], h52[24], l52[24];
+            format_price_num(day_hi, dhi, sizeof(dhi));
+            format_price_num(day_lo, dlo, sizeof(dlo));
+            format_price_num(hi_52w, h52, sizeof(h52));
+            format_price_num(lo_52w, l52, sizeof(l52));
+            snprintf(info_buf, sizeof(info_buf), "Dag: %s - %s   |   52w: %s - %s",
+                     dlo, dhi, l52, h52);
         } else {
             snprintf(info_buf, sizeof(info_buf), "Koershistorie %s", s_tf_labels[s_cur_tf]);
         }
@@ -362,18 +470,16 @@ static void load_state_and_refresh(void) {
         lv_label_set_text(s_lbl_price, "Ophalen...");
         lv_label_set_text(s_lbl_chg, "...");
         lv_obj_set_style_bg_color(s_badge_chg, lv_color_hex(0x4b5563), 0);
-        lv_label_set_text(s_lbl_info, "Live koers wordt bijgewerkt...");
+        lv_label_set_text(s_lbl_info, "Live koers wordt opgehaald...");
     }
 
-    /* Load TSV chart points */
-    char safe_tk[64];
-    make_safe_ticker(s_cur_ticker, safe_tk, sizeof(safe_tk));
-
+    /* 2. Load TSV chart points */
     char tsv_path[256];
     snprintf(tsv_path, sizeof(tsv_path), "%s/%s_%s.tsv", HIST_DIR, safe_tk, s_tf_keys[s_cur_tf]);
 
     FILE * tf = fopen(tsv_path, "r");
     double prices[MAX_CHART_PTS];
+    long timestamps[MAX_CHART_PTS];
     int pt_count = 0;
     double min_p = 1e9, max_p = -1e9;
 
@@ -382,8 +488,10 @@ static void load_state_and_refresh(void) {
         while (fgets(tline, sizeof(tline), tf) && pt_count < MAX_CHART_PTS) {
             char * tab = strchr(tline, '\t');
             if (tab) {
+                long ts = strtol(tline, NULL, 10);
                 double p = strtod(tab + 1, NULL);
                 if (p > 0.0001) {
+                    timestamps[pt_count] = ts;
                     prices[pt_count++] = p;
                     if (p < min_p) min_p = p;
                     if (p > max_p) max_p = p;
@@ -398,7 +506,7 @@ static void load_state_and_refresh(void) {
     if (pt_count >= 2) {
         double span = max_p - min_p;
         if (span < 0.01) span = 1.0;
-        double pad = span * 0.08;
+        double pad = span * 0.05;
         double chart_min = min_p - pad;
         double chart_max = max_p + pad;
 
@@ -416,36 +524,171 @@ static void load_state_and_refresh(void) {
         uint32_t line_color = (prices[pt_count - 1] >= prices[0]) ? 0x16a34a : 0xdc2626;
         lv_chart_set_series_color(s_chart, s_series, lv_color_hex(line_color));
 
-        char hi_buf[32], lo_buf[32];
-        snprintf(hi_buf, sizeof(hi_buf), "Hoog: %.2f", max_p);
-        snprintf(lo_buf, sizeof(lo_buf), "Laag: %.2f", min_p);
-        lv_label_set_text(s_lbl_hi, hi_buf);
-        lv_label_set_text(s_lbl_lo, lo_buf);
+        /* 5 Clean Y-Axis Scale Values: 100%, 75%, 50%, 25%, 0% */
+        double y_levels[5];
+        y_levels[0] = max_p;
+        y_levels[1] = min_p + span * 0.75;
+        y_levels[2] = min_p + span * 0.50;
+        y_levels[3] = min_p + span * 0.25;
+        y_levels[4] = min_p;
+
+        for (int y = 0; y < 5; y++) {
+            char y_buf[32];
+            format_price_num(y_levels[y], y_buf, sizeof(y_buf));
+            lv_label_set_text(s_lbl_y[y], y_buf);
+        }
+
+        /* Start and End date/time labels */
+        if (s_lbl_date_start && s_lbl_date_end && timestamps[0] > 0) {
+            time_t t0 = timestamps[0];
+            time_t t1 = timestamps[pt_count - 1];
+            struct tm tm0, tm1;
+            localtime_r(&t0, &tm0);
+            localtime_r(&t1, &tm1);
+            char b0[32], b1[32];
+            if (s_cur_tf == 0) {
+                strftime(b0, sizeof(b0), "%H:%M", &tm0);
+                strftime(b1, sizeof(b1), "%H:%M", &tm1);
+            } else {
+                strftime(b0, sizeof(b0), "%d-%m", &tm0);
+                strftime(b1, sizeof(b1), "%d-%m", &tm1);
+            }
+            lv_label_set_text(s_lbl_date_start, b0);
+            lv_label_set_text(s_lbl_date_end, b1);
+        }
     } else {
         lv_chart_set_range(s_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
         for (int i = 0; i < 10; i++) {
             lv_chart_set_next_value(s_chart, s_series, 50);
         }
-        lv_label_set_text(s_lbl_hi, "");
-        lv_label_set_text(s_lbl_lo, "");
+        for (int y = 0; y < 5; y++) {
+            lv_label_set_text(s_lbl_y[y], "");
+        }
+        if (s_lbl_date_start) lv_label_set_text(s_lbl_date_start, "");
+        if (s_lbl_date_end) lv_label_set_text(s_lbl_date_end, "");
     }
     lv_chart_refresh(s_chart);
 }
 
+/* Background polling timer to auto-refresh when daemon finishes */
+static void on_poll_timer(lv_timer_t * timer) {
+    (void)timer;
+    if (!s_modal) return;
+
+    struct stat st;
+    if (stat(STATE_PATH, &st) == 0) {
+        if (st.st_mtime != s_last_rendered_mtime) {
+            s_last_rendered_mtime = st.st_mtime;
+            load_state_and_refresh();
+        }
+    }
+}
+
 /* ===================================================================== */
-/* Stock Picker Modal (Categorized grid & on-screen custom ticker input)  */
+/* Favorite Buttons Bar Rendering                                        */
+/* ===================================================================== */
+static void rebuild_fav_bar(void) {
+    if (!s_fav_cont) return;
+    lv_obj_clean(s_fav_cont);
+
+    for (int i = 0; i < s_fav_count && i < MAX_FAVS; i++) {
+        s_fav_btns[i] = lv_btn_create(s_fav_cont);
+        lv_obj_set_size(s_fav_btns[i], SX(80), SY(34));
+        int is_active = (strcmp(s_favs[i].ticker, s_cur_ticker) == 0);
+        lv_obj_set_style_bg_color(s_fav_btns[i], lv_color_hex(is_active ? THEME_BTN_ACCENT : THEME_BTN_BG), 0);
+        lv_obj_set_style_radius(s_fav_btns[i], 8, 0);
+        lv_obj_set_style_pad_all(s_fav_btns[i], 0, 0);
+        lv_obj_add_event_cb(s_fav_btns[i], on_fav_click, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
+        lv_obj_t * l = lv_label_create(s_fav_btns[i]);
+        lv_label_set_text(l, s_favs[i].name);
+        lv_obj_set_style_text_font(l, SF(13), 0);
+        lv_obj_set_style_text_color(l, lv_color_hex(THEME_TEXT_HI), 0);
+        lv_obj_center(l);
+    }
+
+    /* "+ Kiezen" button */
+    s_btn_more = lv_btn_create(s_fav_cont);
+    lv_obj_set_size(s_btn_more, SX(92), SY(34));
+    lv_obj_set_style_bg_color(s_btn_more, lv_color_hex(0x27272a), 0);
+    lv_obj_set_style_border_color(s_btn_more, lv_color_hex(THEME_BORDER), 0);
+    lv_obj_set_style_border_width(s_btn_more, 1, 0);
+    lv_obj_set_style_radius(s_btn_more, 8, 0);
+    lv_obj_set_style_pad_all(s_btn_more, 0, 0);
+    lv_obj_add_event_cb(s_btn_more, on_more_click, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t * lm = lv_label_create(s_btn_more);
+    lv_label_set_text(lm, "+ Kiezen");
+    lv_obj_set_style_text_font(lm, SF(13), 0);
+    lv_obj_set_style_text_color(lm, lv_color_hex(THEME_TEXT_HI), 0);
+    lv_obj_center(lm);
+}
+
+/* ===================================================================== */
+/* Stock Picker Modal (Favorites Management & All AEX Presets)           */
 /* ===================================================================== */
 
-static void on_picker_item_click(lv_event_t * e) {
+static void render_picker_favs(void);
+static void render_picker_grid(void);
+
+static void on_picker_remove_fav(lv_event_t * e) {
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
-    if (idx >= 0 && idx < (int)NUM_ALL_PRESETS) {
-        save_selected_ticker(s_all_presets[idx].ticker, s_all_presets[idx].name);
+    if (idx >= 0 && idx < s_fav_count) {
+        for (int i = idx; i < s_fav_count - 1; i++) {
+            s_favs[i] = s_favs[i + 1];
+        }
+        s_fav_count--;
+        save_config();
+        rebuild_fav_bar();
+        render_picker_favs();
+        render_picker_grid();
+    }
+}
+
+static void on_picker_toggle_fav(lv_event_t * e) {
+    int p_idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (p_idx < 0 || p_idx >= (int)NUM_ALL_PRESETS) return;
+
+    const stock_preset_t * p = &s_all_presets[p_idx];
+    int fav_idx = -1;
+    for (int i = 0; i < s_fav_count; i++) {
+        if (strcasecmp(s_favs[i].ticker, p->ticker) == 0) {
+            fav_idx = i;
+            break;
+        }
+    }
+
+    if (fav_idx >= 0) {
+        /* Remove from favs */
+        for (int i = fav_idx; i < s_fav_count - 1; i++) {
+            s_favs[i] = s_favs[i + 1];
+        }
+        s_fav_count--;
+    } else {
+        /* Add to favs if space available */
+        if (s_fav_count < MAX_FAVS) {
+            snprintf(s_favs[s_fav_count].ticker, sizeof(s_favs[0].ticker), "%s", p->ticker);
+            snprintf(s_favs[s_fav_count].name, sizeof(s_favs[0].name), "%s", p->name);
+            s_fav_count++;
+        }
+    }
+
+    save_config();
+    rebuild_fav_bar();
+    render_picker_favs();
+    render_picker_grid();
+}
+
+static void on_picker_select_stock(lv_event_t * e) {
+    int p_idx = (int)(intptr_t)lv_event_get_user_data(e);
+    if (p_idx >= 0 && p_idx < (int)NUM_ALL_PRESETS) {
+        save_selected_ticker(s_all_presets[p_idx].ticker, s_all_presets[p_idx].name);
         close_picker_modal();
         load_state_and_refresh();
     }
 }
 
-static void on_picker_custom_select(void) {
+static void on_picker_custom_action(int add_to_fav) {
     if (!s_picker_ta) return;
     const char * txt = lv_textarea_get_text(s_picker_ta);
     if (!txt || !txt[0]) return;
@@ -459,23 +702,37 @@ static void on_picker_custom_select(void) {
         }
     }
     cleaned[j] = 0;
+    if (!cleaned[0]) return;
 
-    if (cleaned[0]) {
-        save_selected_ticker(cleaned, cleaned);
-        close_picker_modal();
-        load_state_and_refresh();
+    if (add_to_fav && s_fav_count < MAX_FAVS && !is_in_favs(cleaned)) {
+        snprintf(s_favs[s_fav_count].ticker, sizeof(s_favs[0].ticker), "%s", cleaned);
+        snprintf(s_favs[s_fav_count].name, sizeof(s_favs[0].name), "%s", cleaned);
+        s_fav_count++;
+        save_config();
+        rebuild_fav_bar();
+        render_picker_favs();
+        render_picker_grid();
     }
+
+    save_selected_ticker(cleaned, cleaned);
+    close_picker_modal();
+    load_state_and_refresh();
 }
 
-static void on_picker_custom_click(lv_event_t * e) {
+static void on_picker_btn_view(lv_event_t * e) {
     (void)e;
-    on_picker_custom_select();
+    on_picker_custom_action(0);
+}
+
+static void on_picker_btn_add(lv_event_t * e) {
+    (void)e;
+    on_picker_custom_action(1);
 }
 
 static void on_picker_kb_event(lv_event_t * e) {
     lv_event_code_t code = lv_event_get_code(e);
     if (code == LV_EVENT_READY) {
-        on_picker_custom_select();
+        on_picker_custom_action(0);
     } else if (code == LV_EVENT_CANCEL) {
         close_picker_modal();
     }
@@ -485,6 +742,8 @@ static void close_picker_modal(void) {
     if (s_picker_modal) {
         lv_obj_del(s_picker_modal);
         s_picker_modal = NULL;
+        s_picker_favs_cont = NULL;
+        s_picker_grid_cont = NULL;
         s_picker_ta = NULL;
         s_picker_kb = NULL;
     }
@@ -495,11 +754,87 @@ static void on_picker_close_click(lv_event_t * e) {
     close_picker_modal();
 }
 
+static void render_picker_favs(void) {
+    if (!s_picker_favs_cont) return;
+    lv_obj_clean(s_picker_favs_cont);
+
+    for (int i = 0; i < s_fav_count; i++) {
+        lv_obj_t * b = lv_btn_create(s_picker_favs_cont);
+        lv_obj_set_size(b, SX(112), SY(32));
+        lv_obj_set_style_bg_color(b, lv_color_hex(0x27272a), 0);
+        lv_obj_set_style_border_color(b, lv_color_hex(THEME_BORDER), 0);
+        lv_obj_set_style_border_width(b, 1, 0);
+        lv_obj_set_style_radius(b, 8, 0);
+        lv_obj_set_style_pad_all(b, 0, 0);
+        lv_obj_add_event_cb(b, on_picker_remove_fav, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
+        lv_obj_t * l = lv_label_create(b);
+        lv_label_set_text_fmt(l, "%s  #dc2626 " LV_SYMBOL_CLOSE "#", s_favs[i].name);
+        lv_label_set_recolor(l, true);
+        lv_obj_set_style_text_font(l, SF(12), 0);
+        lv_obj_set_style_text_color(l, lv_color_hex(THEME_TEXT_HI), 0);
+        lv_obj_center(l);
+    }
+}
+
+static void render_picker_grid(void) {
+    if (!s_picker_grid_cont) return;
+    lv_obj_clean(s_picker_grid_cont);
+
+    for (size_t i = 0; i < NUM_ALL_PRESETS; i++) {
+        int in_fav = is_in_favs(s_all_presets[i].ticker);
+
+        lv_obj_t * card = lv_obj_create(s_picker_grid_cont);
+        lv_obj_set_size(card, SX(174), SY(46));
+        lv_obj_set_style_bg_color(card, lv_color_hex(0x222226), 0);
+        lv_obj_set_style_border_color(card, lv_color_hex(in_fav ? 0x16a34a : THEME_BORDER), 0);
+        lv_obj_set_style_border_width(card, in_fav ? 2 : 1, 0);
+        lv_obj_set_style_radius(card, 8, 0);
+        lv_obj_set_style_pad_all(card, SX(4), 0);
+        lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+        /* Main click area to select stock */
+        lv_obj_t * b_sel = lv_btn_create(card);
+        lv_obj_set_size(b_sel, SX(116), SY(36));
+        lv_obj_align(b_sel, LV_ALIGN_LEFT_MID, 0, 0);
+        lv_obj_set_style_bg_opa(b_sel, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_pad_all(b_sel, 0, 0);
+        lv_obj_add_event_cb(b_sel, on_picker_select_stock, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
+        lv_obj_t * l_name = lv_label_create(b_sel);
+        lv_label_set_text(l_name, s_all_presets[i].name);
+        lv_obj_set_style_text_font(l_name, SF(13), 0);
+        lv_obj_set_style_text_color(l_name, lv_color_hex(THEME_TEXT_HI), 0);
+        lv_obj_align(l_name, LV_ALIGN_TOP_LEFT, SX(2), SY(2));
+
+        lv_obj_t * l_tk = lv_label_create(b_sel);
+        lv_label_set_text(l_tk, s_all_presets[i].ticker);
+        lv_obj_set_style_text_font(l_tk, SF(11), 0);
+        lv_obj_set_style_text_color(l_tk, lv_color_hex(THEME_TEXT_DIM), 0);
+        lv_obj_align(l_tk, LV_ALIGN_BOTTOM_LEFT, SX(2), SY(-2));
+
+        /* Toggle Favorite Button */
+        lv_obj_t * b_fav = lv_btn_create(card);
+        lv_obj_set_size(b_fav, SX(44), SY(34));
+        lv_obj_align(b_fav, LV_ALIGN_RIGHT_MID, 0, 0);
+        lv_obj_set_style_bg_color(b_fav, lv_color_hex(in_fav ? 0x16a34a : 0x334155), 0);
+        lv_obj_set_style_radius(b_fav, 6, 0);
+        lv_obj_set_style_pad_all(b_fav, 0, 0);
+        lv_obj_add_event_cb(b_fav, on_picker_toggle_fav, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
+        lv_obj_t * l_fav = lv_label_create(b_fav);
+        lv_label_set_text(l_fav, in_fav ? LV_SYMBOL_OK : "+");
+        lv_obj_set_style_text_font(l_fav, SF(14), 0);
+        lv_obj_set_style_text_color(l_fav, lv_color_hex(0xffffff), 0);
+        lv_obj_center(l_fav);
+    }
+}
+
 static void open_picker_modal(void) {
     if (s_picker_modal) close_picker_modal();
 
     s_picker_modal = lv_obj_create(s_modal);
-    lv_obj_set_size(s_picker_modal, LV_PCT(94), LV_PCT(92));
+    lv_obj_set_size(s_picker_modal, LV_PCT(96), LV_PCT(94));
     lv_obj_center(s_picker_modal);
     lv_obj_set_style_bg_color(s_picker_modal, lv_color_hex(0x18181b), 0);
     lv_obj_set_style_border_color(s_picker_modal, lv_color_hex(THEME_BORDER), 0);
@@ -509,14 +844,14 @@ static void open_picker_modal(void) {
 
     /* Header */
     lv_obj_t * lbl_head = lv_label_create(s_picker_modal);
-    lv_label_set_text(lbl_head, "Kies Aandeel of Index");
-    lv_obj_set_style_text_font(lbl_head, SF(20), 0);
+    lv_label_set_text(lbl_head, "Kies & Beheer AEX Aandelen");
+    lv_obj_set_style_text_font(lbl_head, SF(18), 0);
     lv_obj_set_style_text_color(lbl_head, lv_color_hex(THEME_TEXT_HI), 0);
-    lv_obj_align(lbl_head, LV_ALIGN_TOP_LEFT, SX(6), SY(4));
+    lv_obj_align(lbl_head, LV_ALIGN_TOP_LEFT, SX(6), SY(2));
 
     /* Close Button */
     lv_obj_t * btn_cls = lv_btn_create(s_picker_modal);
-    lv_obj_set_size(btn_cls, SX(48), SY(36));
+    lv_obj_set_size(btn_cls, SX(46), SY(34));
     lv_obj_align(btn_cls, LV_ALIGN_TOP_RIGHT, 0, 0);
     lv_obj_set_style_bg_color(btn_cls, lv_color_hex(THEME_BTN_BG), 0);
     lv_obj_set_style_radius(btn_cls, 8, 0);
@@ -525,58 +860,71 @@ static void open_picker_modal(void) {
     lv_label_set_text(l_cls, LV_SYMBOL_CLOSE);
     lv_obj_center(l_cls);
 
-    /* Custom Ticker Row: Textarea + Button */
+    /* Section 1: Active Favorite Buttons on Bar */
+    lv_obj_t * lbl_favs = lv_label_create(s_picker_modal);
+    lv_label_set_text(lbl_favs, "Knoppenbalk favorieten (tik om te verwijderen):");
+    lv_obj_set_style_text_font(lbl_favs, SF(12), 0);
+    lv_obj_set_style_text_color(lbl_favs, lv_color_hex(THEME_TEXT_DIM), 0);
+    lv_obj_set_pos(lbl_favs, SX(6), SY(36));
+
+    s_picker_favs_cont = lv_obj_create(s_picker_modal);
+    lv_obj_set_size(s_picker_favs_cont, LV_PCT(100), SY(42));
+    lv_obj_set_pos(s_picker_favs_cont, 0, SY(54));
+    lv_obj_set_style_bg_color(s_picker_favs_cont, lv_color_hex(0x18181b), 0);
+    lv_obj_set_style_border_width(s_picker_favs_cont, 0, 0);
+    lv_obj_set_style_pad_all(s_picker_favs_cont, SX(2), 0);
+    lv_obj_set_flex_flow(s_picker_favs_cont, LV_FLEX_FLOW_ROW);
+    lv_obj_set_scrollbar_mode(s_picker_favs_cont, LV_SCROLLBAR_MODE_OFF);
+    render_picker_favs();
+
+    /* Section 2: Custom Ticker Input */
     s_picker_ta = lv_textarea_create(s_picker_modal);
-    lv_obj_set_size(s_picker_ta, SX(280), SY(40));
-    lv_obj_set_pos(s_picker_ta, SX(6), SY(42));
+    lv_obj_set_size(s_picker_ta, SX(240), SY(36));
+    lv_obj_set_pos(s_picker_ta, SX(6), SY(102));
     lv_textarea_set_one_line(s_picker_ta, true);
-    lv_textarea_set_placeholder_text(s_picker_ta, "Symbool (bijv. NVDA, AAPL)...");
+    lv_textarea_set_placeholder_text(s_picker_ta, "Ticker (bijv. ASML, AAPL)...");
     lv_obj_set_style_bg_color(s_picker_ta, lv_color_hex(0x27272a), 0);
     lv_obj_set_style_text_color(s_picker_ta, lv_color_hex(THEME_TEXT_HI), 0);
     lv_obj_set_style_border_color(s_picker_ta, lv_color_hex(THEME_BORDER), 0);
     lv_obj_set_style_radius(s_picker_ta, 8, 0);
 
-    lv_obj_t * btn_custom = lv_btn_create(s_picker_modal);
-    lv_obj_set_size(btn_custom, SX(110), SY(40));
-    lv_obj_set_pos(btn_custom, SX(294), SY(42));
-    lv_obj_set_style_bg_color(btn_custom, lv_color_hex(THEME_BTN_ACCENT), 0);
-    lv_obj_set_style_radius(btn_custom, 8, 0);
-    lv_obj_add_event_cb(btn_custom, on_picker_custom_click, LV_EVENT_CLICKED, NULL);
-    lv_obj_t * lc = lv_label_create(btn_custom);
-    lv_label_set_text(lc, "Toepassen");
-    lv_obj_center(lc);
+    lv_obj_t * b_view = lv_btn_create(s_picker_modal);
+    lv_obj_set_size(b_view, SX(96), SY(36));
+    lv_obj_set_pos(b_view, SX(252), SY(102));
+    lv_obj_set_style_bg_color(b_view, lv_color_hex(THEME_BTN_ACCENT), 0);
+    lv_obj_set_style_radius(b_view, 8, 0);
+    lv_obj_add_event_cb(b_view, on_picker_btn_view, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * lv = lv_label_create(b_view);
+    lv_label_set_text(lv, "Bekijken");
+    lv_obj_center(lv);
 
-    /* Grid of Preset Buttons in a scrollable container */
-    int cont_y = SY(88);
-    int cont_h = (LV_VER_RES < 600) ? SY(190) : SY(240);
+    lv_obj_t * b_add = lv_btn_create(s_picker_modal);
+    lv_obj_set_size(b_add, SX(96), SY(36));
+    lv_obj_set_pos(b_add, SX(354), SY(102));
+    lv_obj_set_style_bg_color(b_add, lv_color_hex(0x16a34a), 0);
+    lv_obj_set_style_radius(b_add, 8, 0);
+    lv_obj_add_event_cb(b_add, on_picker_btn_add, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * la = lv_label_create(b_add);
+    lv_label_set_text(la, "+ Aan balk");
+    lv_obj_center(la);
 
-    lv_obj_t * cont = lv_obj_create(s_picker_modal);
-    lv_obj_set_size(cont, LV_PCT(100), cont_h);
-    lv_obj_set_pos(cont, 0, cont_y);
-    lv_obj_set_style_bg_color(cont, lv_color_hex(0x18181b), 0);
-    lv_obj_set_style_border_width(cont, 0, 0);
-    lv_obj_set_style_pad_all(cont, SX(4), 0);
-    lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_ROW_WRAP);
-    lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    /* Section 3: All AEX & Global Presets Grid */
+    int cont_y = SY(146);
+    int cont_h = (LV_VER_RES < 600) ? SY(150) : SY(180);
 
-    for (size_t i = 0; i < NUM_ALL_PRESETS; i++) {
-        lv_obj_t * b = lv_btn_create(cont);
-        lv_obj_set_size(b, SX(135), SY(38));
-        lv_obj_set_style_bg_color(b, lv_color_hex(THEME_BTN_BG), 0);
-        lv_obj_set_style_radius(b, 8, 0);
-        lv_obj_set_style_pad_all(b, SX(2), 0);
-        lv_obj_add_event_cb(b, on_picker_item_click, LV_EVENT_CLICKED, (void *)(intptr_t)i);
-
-        lv_obj_t * l = lv_label_create(b);
-        lv_label_set_text(l, s_all_presets[i].name);
-        lv_obj_set_style_text_font(l, SF(14), 0);
-        lv_obj_set_style_text_color(l, lv_color_hex(THEME_TEXT_HI), 0);
-        lv_obj_center(l);
-    }
+    s_picker_grid_cont = lv_obj_create(s_picker_modal);
+    lv_obj_set_size(s_picker_grid_cont, LV_PCT(100), cont_h);
+    lv_obj_set_pos(s_picker_grid_cont, 0, cont_y);
+    lv_obj_set_style_bg_color(s_picker_grid_cont, lv_color_hex(0x18181b), 0);
+    lv_obj_set_style_border_width(s_picker_grid_cont, 0, 0);
+    lv_obj_set_style_pad_all(s_picker_grid_cont, SX(4), 0);
+    lv_obj_set_flex_flow(s_picker_grid_cont, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(s_picker_grid_cont, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    render_picker_grid();
 
     /* On-Screen Virtual Keyboard */
     s_picker_kb = lv_keyboard_create(s_picker_modal);
-    int kb_h = (LV_VER_RES < 600) ? SY(140) : SY(170);
+    int kb_h = (LV_VER_RES < 600) ? SY(120) : SY(150);
     lv_obj_set_size(s_picker_kb, LV_PCT(100), kb_h);
     lv_obj_align(s_picker_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_keyboard_set_textarea(s_picker_kb, s_picker_ta);
@@ -604,10 +952,13 @@ lv_obj_t * screen_create(void) {
     lv_obj_set_style_radius(s_modal, 0, 0);
     lv_obj_clear_flag(s_modal, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* Top Right Buttons: Close & Refresh */
-    int x_w = (LV_VER_RES < 600) ? 56 : 64;
-    int x_h = (LV_VER_RES < 600) ? 42 : 46;
+    /* ================================================================= */
+    /* ROW 1: Header (Title, Price, Change Badge, Refresh, Close)        */
+    /* ================================================================= */
+    int x_w = (LV_VER_RES < 600) ? 52 : 60;
+    int x_h = (LV_VER_RES < 600) ? 38 : 44;
 
+    /* Close Button */
     lv_obj_t * b_close = lv_btn_create(s_modal);
     lv_obj_set_size(b_close, x_w, x_h);
     lv_obj_align(b_close, LV_ALIGN_TOP_RIGHT, SX(-12), SY(8));
@@ -617,9 +968,10 @@ lv_obj_t * screen_create(void) {
 
     lv_obj_t * lbl_close = lv_label_create(b_close);
     lv_label_set_text(lbl_close, LV_SYMBOL_CLOSE);
-    lv_obj_set_style_text_font(lbl_close, SF(20), 0);
+    lv_obj_set_style_text_font(lbl_close, SF(18), 0);
     lv_obj_center(lbl_close);
 
+    /* Refresh Button */
     lv_obj_t * b_ref = lv_btn_create(s_modal);
     lv_obj_set_size(b_ref, x_w, x_h);
     lv_obj_align(b_ref, LV_ALIGN_TOP_RIGHT, SX(-12) - x_w - SX(8), SY(8));
@@ -629,138 +981,148 @@ lv_obj_t * screen_create(void) {
 
     lv_obj_t * lbl_ref = lv_label_create(b_ref);
     lv_label_set_text(lbl_ref, LV_SYMBOL_REFRESH);
-    lv_obj_set_style_text_font(lbl_ref, SF(18), 0);
+    lv_obj_set_style_text_font(lbl_ref, SF(16), 0);
     lv_obj_center(lbl_ref);
 
     /* Stock Name / Symbol */
     s_lbl_title = lv_label_create(s_modal);
     lv_label_set_text(s_lbl_title, s_cur_name);
-    lv_obj_set_style_text_font(s_lbl_title, SF(22), 0);
+    lv_obj_set_style_text_font(s_lbl_title, SF(20), 0);
     lv_obj_set_style_text_color(s_lbl_title, lv_color_hex(THEME_TEXT_HI), 0);
-    lv_obj_set_pos(s_lbl_title, SX(16), SY(10));
+    lv_obj_set_pos(s_lbl_title, SX(16), SY(8));
 
     /* Current Price Label */
     s_lbl_price = lv_label_create(s_modal);
     lv_label_set_text(s_lbl_price, "...");
-    const lv_font_t * pf = (LV_VER_RES < 600) ? SF(28) : SF(36);
+    const lv_font_t * pf = (LV_VER_RES < 600) ? SF(28) : SF(34);
     lv_obj_set_style_text_font(s_lbl_price, pf, 0);
     lv_obj_set_style_text_color(s_lbl_price, lv_color_hex(THEME_TEXT_HI), 0);
-    lv_obj_set_pos(s_lbl_price, SX(16), SY(36));
+    lv_obj_set_pos(s_lbl_price, SX(16), SY(32));
 
     /* Change Badge Pill */
     s_badge_chg = lv_obj_create(s_modal);
-    lv_obj_set_size(s_badge_chg, SX(160), SY(32));
-    lv_obj_set_pos(s_badge_chg, SX(240), SY(40));
+    lv_obj_set_size(s_badge_chg, SX(165), SY(30));
+    lv_obj_set_pos(s_badge_chg, SX(240), SY(36));
     lv_obj_set_style_bg_color(s_badge_chg, lv_color_hex(0x16a34a), 0);
-    lv_obj_set_style_radius(s_badge_chg, 16, 0);
+    lv_obj_set_style_radius(s_badge_chg, 15, 0);
     lv_obj_set_style_border_width(s_badge_chg, 0, 0);
     lv_obj_set_style_pad_all(s_badge_chg, 0, 0);
     lv_obj_clear_flag(s_badge_chg, LV_OBJ_FLAG_SCROLLABLE);
 
     s_lbl_chg = lv_label_create(s_badge_chg);
     lv_label_set_text(s_lbl_chg, "...");
-    lv_obj_set_style_text_font(s_lbl_chg, SF(16), 0);
+    lv_obj_set_style_text_font(s_lbl_chg, SF(15), 0);
     lv_obj_set_style_text_color(s_lbl_chg, lv_color_hex(0xffffff), 0);
     lv_obj_center(s_lbl_chg);
 
-    /* Secondary Info / Day Range */
+    /* ================================================================= */
+    /* ROW 2: Dedicated Stock Favorites Bar (Never Overlaps!)            */
+    /* ================================================================= */
+    int row2_y = SY(72);
+    s_fav_cont = lv_obj_create(s_modal);
+    lv_obj_set_size(s_fav_cont, LV_HOR_RES - SX(32), SY(40));
+    lv_obj_set_pos(s_fav_cont, SX(16), row2_y);
+    lv_obj_set_style_bg_color(s_fav_cont, lv_color_hex(THEME_BG), 0);
+    lv_obj_set_style_border_width(s_fav_cont, 0, 0);
+    lv_obj_set_style_pad_all(s_fav_cont, 0, 0);
+    lv_obj_set_flex_flow(s_fav_cont, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(s_fav_cont, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scrollbar_mode(s_fav_cont, LV_SCROLLBAR_MODE_OFF);
+    rebuild_fav_bar();
+
+    /* ================================================================= */
+    /* ROW 3: Secondary Range Info (Left) + Timeframe Chips (Right)      */
+    /* ================================================================= */
+    int row3_y = SY(116);
+
     s_lbl_info = lv_label_create(s_modal);
     lv_label_set_text(s_lbl_info, "...");
-    lv_obj_set_style_text_font(s_lbl_info, SF(14), 0);
+    lv_obj_set_style_text_font(s_lbl_info, SF(13), 0);
     lv_obj_set_style_text_color(s_lbl_info, lv_color_hex(THEME_TEXT_DIM), 0);
-    lv_obj_set_pos(s_lbl_info, SX(16), SY(78));
-
-    /* Quick Preset Stock Chips Row */
-    int chip_y = SY(104);
-    int chip_w = SX(84);
-    int chip_h = SY(34);
-    int chip_gap = SX(6);
-
-    for (int i = 0; i < s_fav_count && i < MAX_FAVS; i++) {
-        s_fav_btns[i] = lv_btn_create(s_modal);
-        lv_obj_set_size(s_fav_btns[i], chip_w, chip_h);
-        lv_obj_set_pos(s_fav_btns[i], SX(16) + i * (chip_w + chip_gap), chip_y);
-        lv_obj_set_style_bg_color(s_fav_btns[i], lv_color_hex(THEME_BTN_BG), 0);
-        lv_obj_set_style_radius(s_fav_btns[i], 8, 0);
-        lv_obj_set_style_pad_all(s_fav_btns[i], 0, 0);
-        lv_obj_add_event_cb(s_fav_btns[i], on_fav_click, LV_EVENT_CLICKED, (void *)(intptr_t)i);
-
-        lv_obj_t * l = lv_label_create(s_fav_btns[i]);
-        lv_label_set_text(l, s_favs[i].name);
-        lv_obj_set_style_text_font(l, SF(14), 0);
-        lv_obj_set_style_text_color(l, lv_color_hex(THEME_TEXT_HI), 0);
-        lv_obj_center(l);
-    }
-
-    /* "+ Kiezen" button */
-    s_btn_more = lv_btn_create(s_modal);
-    lv_obj_set_size(s_btn_more, SX(92), chip_h);
-    lv_obj_set_pos(s_btn_more, SX(16) + s_fav_count * (chip_w + chip_gap), chip_y);
-    lv_obj_set_style_bg_color(s_btn_more, lv_color_hex(0x27272a), 0);
-    lv_obj_set_style_border_color(s_btn_more, lv_color_hex(THEME_BORDER), 0);
-    lv_obj_set_style_border_width(s_btn_more, 1, 0);
-    lv_obj_set_style_radius(s_btn_more, 8, 0);
-    lv_obj_set_style_pad_all(s_btn_more, 0, 0);
-    lv_obj_add_event_cb(s_btn_more, on_more_click, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_t * lm = lv_label_create(s_btn_more);
-    lv_label_set_text(lm, "+ Kiezen");
-    lv_obj_set_style_text_font(lm, SF(14), 0);
-    lv_obj_set_style_text_color(lm, lv_color_hex(THEME_TEXT_HI), 0);
-    lv_obj_center(lm);
+    lv_obj_set_pos(s_lbl_info, SX(16), row3_y + SY(4));
 
     /* Timeframe Selector Chips Row (1D, 5D, 1M, 6M, 1J) */
-    int tf_chip_w = SX(56);
-    int tf_start_x = LV_HOR_RES - SX(16) - 5 * (tf_chip_w + chip_gap);
+    int tf_chip_w = SX(48);
+    int tf_chip_h = SY(28);
+    int tf_gap = SX(6);
+    int tf_start_x = LV_HOR_RES - SX(16) - 5 * (tf_chip_w + tf_gap);
+
     for (int i = 0; i < 5; i++) {
         s_tf_btns[i] = lv_btn_create(s_modal);
-        lv_obj_set_size(s_tf_btns[i], tf_chip_w, chip_h);
-        lv_obj_set_pos(s_tf_btns[i], tf_start_x + i * (tf_chip_w + chip_gap), chip_y);
+        lv_obj_set_size(s_tf_btns[i], tf_chip_w, tf_chip_h);
+        lv_obj_set_pos(s_tf_btns[i], tf_start_x + i * (tf_chip_w + tf_gap), row3_y);
         lv_obj_set_style_bg_color(s_tf_btns[i], lv_color_hex(THEME_BTN_BG), 0);
-        lv_obj_set_style_radius(s_tf_btns[i], 8, 0);
+        lv_obj_set_style_radius(s_tf_btns[i], 6, 0);
         lv_obj_set_style_pad_all(s_tf_btns[i], 0, 0);
         lv_obj_add_event_cb(s_tf_btns[i], on_tf_click, LV_EVENT_CLICKED, (void *)(intptr_t)i);
 
         lv_obj_t * l = lv_label_create(s_tf_btns[i]);
         lv_label_set_text(l, s_tf_labels[i]);
-        lv_obj_set_style_text_font(l, SF(14), 0);
+        lv_obj_set_style_text_font(l, SF(13), 0);
         lv_obj_set_style_text_color(l, lv_color_hex(THEME_TEXT_HI), 0);
         lv_obj_center(l);
     }
 
+    /* ================================================================= */
+    /* ROW 4: Chart + Dedicated Clear Y-Axis Values                      */
+    /* ================================================================= */
+    int chart_y = row3_y + SY(32);
+    int chart_h = LV_VER_RES - chart_y - SY(16);
+    int y_axis_w = SX(74);
+
+    /* 5 Y-Axis Labels aligned with the 5 horizontal grid lines */
+    for (int y = 0; y < 5; y++) {
+        s_lbl_y[y] = lv_label_create(s_modal);
+        lv_label_set_text(s_lbl_y[y], "");
+        lv_obj_set_style_text_font(s_lbl_y[y], SF(12), 0);
+        lv_obj_set_style_text_color(s_lbl_y[y], lv_color_hex(THEME_TEXT_DIM), 0);
+        lv_obj_set_style_text_align(s_lbl_y[y], LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_set_size(s_lbl_y[y], y_axis_w, SY(16));
+
+        int pos_y;
+        if (y == 0) pos_y = chart_y + SY(2);
+        else if (y == 4) pos_y = chart_y + chart_h - SY(18);
+        else pos_y = chart_y + (int)((chart_h - SY(16)) * (y / 4.0));
+
+        lv_obj_set_pos(s_lbl_y[y], SX(8), pos_y);
+    }
+
     /* Chart Container & lv_chart */
-    int chart_y = chip_y + chip_h + SY(10);
-    int chart_h = LV_VER_RES - chart_y - SY(14);
+    int chart_x = SX(12) + y_axis_w + SX(4);
+    int chart_w = LV_HOR_RES - chart_x - SX(16);
 
     s_chart = lv_chart_create(s_modal);
-    lv_obj_set_size(s_chart, LV_HOR_RES - SX(32), chart_h);
-    lv_obj_set_pos(s_chart, SX(16), chart_y);
+    lv_obj_set_size(s_chart, chart_w, chart_h);
+    lv_obj_set_pos(s_chart, chart_x, chart_y);
     lv_chart_set_type(s_chart, LV_CHART_TYPE_LINE);
     lv_chart_set_div_line_count(s_chart, 5, 8);
     lv_obj_set_style_bg_color(s_chart, lv_color_hex(THEME_CARD_BG), 0);
     lv_obj_set_style_border_color(s_chart, lv_color_hex(THEME_BORDER), 0);
     lv_obj_set_style_border_width(s_chart, 1, 0);
     lv_obj_set_style_radius(s_chart, 12, 0);
-    lv_obj_set_style_pad_all(s_chart, SX(10), 0);
+    lv_obj_set_style_pad_all(s_chart, SX(6), 0);
     lv_chart_set_update_mode(s_chart, LV_CHART_UPDATE_MODE_CIRCULAR);
 
     s_series = lv_chart_add_series(s_chart, lv_color_hex(0x16a34a), LV_CHART_AXIS_PRIMARY_Y);
 
-    /* Min and Max labels on chart overlay */
-    s_lbl_hi = lv_label_create(s_modal);
-    lv_label_set_text(s_lbl_hi, "");
-    lv_obj_set_style_text_font(s_lbl_hi, SF(14), 0);
-    lv_obj_set_style_text_color(s_lbl_hi, lv_color_hex(THEME_TEXT_DIM), 0);
-    lv_obj_set_pos(s_lbl_hi, SX(28), chart_y + SY(8));
+    /* Date/Time Labels under chart */
+    s_lbl_date_start = lv_label_create(s_modal);
+    lv_label_set_text(s_lbl_date_start, "");
+    lv_obj_set_style_text_font(s_lbl_date_start, SF(11), 0);
+    lv_obj_set_style_text_color(s_lbl_date_start, lv_color_hex(THEME_TEXT_DIM), 0);
+    lv_obj_set_pos(s_lbl_date_start, chart_x + SX(4), chart_y + chart_h - SY(14));
 
-    s_lbl_lo = lv_label_create(s_modal);
-    lv_label_set_text(s_lbl_lo, "");
-    lv_obj_set_style_text_font(s_lbl_lo, SF(14), 0);
-    lv_obj_set_style_text_color(s_lbl_lo, lv_color_hex(THEME_TEXT_DIM), 0);
-    lv_obj_set_pos(s_lbl_lo, SX(28), chart_y + chart_h - SY(24));
+    s_lbl_date_end = lv_label_create(s_modal);
+    lv_label_set_text(s_lbl_date_end, "");
+    lv_obj_set_style_text_font(s_lbl_date_end, SF(11), 0);
+    lv_obj_set_style_text_color(s_lbl_date_end, lv_color_hex(THEME_TEXT_DIM), 0);
+    lv_obj_align_to(s_lbl_date_end, s_chart, LV_ALIGN_OUT_BOTTOM_RIGHT, SX(-6), SY(-14));
 
     /* Load state & render */
     load_state_and_refresh();
+
+    /* Start 400ms background polling timer */
+    s_poll_timer = lv_timer_create(on_poll_timer, 400, NULL);
 
     return s_modal;
 }

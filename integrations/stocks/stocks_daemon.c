@@ -3,8 +3,8 @@
  *
  * Runs in background. Periodically fetches live stock quotes and historical
  * chart data (Yahoo Finance API) for the configured stock/index (default: ^AEX).
- * Persists data to state.json & TSV series, and notifies FreeToon HTTP API
- * on port 10081 to keep the home tile live.
+ * Persists data to state.json, per-ticker state_<safe_ticker>.json & TSV series,
+ * and notifies FreeToon HTTP API on port 10081 to keep the home tile live.
  */
 
 #define _GNU_SOURCE
@@ -28,8 +28,9 @@
 #define STATE_PATH      BASE_DIR "/state.json"
 #define TRIG_PATH       BASE_DIR "/reload.trig"
 
-#define POLL_INTERVAL_S 120   /* 2 minutes for quote & 1d chart */
-#define HIST_INTERVAL_S 3600  /* 1 hour for 5d, 1mo, 6mo, 1y */
+#define POLL_INTERVAL_S 120   /* 2 minutes for quote & current chart */
+#define HIST_INTERVAL_S 1800  /* 30 minutes for background history */
+#define MAX_FAVS        12
 
 #define MAX_JSON_BUF    (128 * 1024)
 
@@ -54,6 +55,10 @@ typedef struct {
 static volatile int g_running = 1;
 static char g_curr_ticker[32] = "^AEX";
 static char g_curr_name[64] = "AEX-Index";
+static char g_curr_tf[16] = "1d";
+static char g_fav_tickers[MAX_FAVS][32];
+static char g_fav_names[MAX_FAVS][64];
+static int g_fav_count = 0;
 static time_t g_conf_mtime = 0;
 
 static void on_signal(int sig) {
@@ -101,20 +106,19 @@ static void ensure_conf_exists(void) {
             fprintf(f, "TICKER=^AEX\n");
             fprintf(f, "NAME=AEX-Index\n");
             fprintf(f, "TIMEFRAME=1d\n");
-            fprintf(f, "FAV=^AEX,AEX-Index\n");
+            fprintf(f, "FAV=^AEX,AEX\n");
             fprintf(f, "FAV=ASML.AS,ASML\n");
             fprintf(f, "FAV=SHELL.AS,Shell\n");
             fprintf(f, "FAV=INGA.AS,ING\n");
-            fprintf(f, "FAV=AD.AS,Ahold Delhaize\n");
+            fprintf(f, "FAV=AD.AS,Ahold\n");
             fprintf(f, "FAV=HEIA.AS,Heineken\n");
-            fprintf(f, "FAV=PHIA.AS,Philips\n");
-            fprintf(f, "FAV=^GSPC,S&P 500\n");
+            fprintf(f, "FAV=ADYEN.AS,Adyen\n");
             fclose(f);
         }
     }
 }
 
-static int read_conf(char * ticker, size_t tlen, char * name, size_t nlen) {
+static int read_conf(char * ticker, size_t tlen, char * name, size_t nlen, char * tf, size_t tflen) {
     FILE * f = fopen(CONF_PATH, "r");
     if (!f) return 0;
 
@@ -126,6 +130,8 @@ static int read_conf(char * ticker, size_t tlen, char * name, size_t nlen) {
     char line[256];
     ticker[0] = 0;
     name[0] = 0;
+    tf[0] = 0;
+    g_fav_count = 0;
 
     while (fgets(line, sizeof(line), f)) {
         char * nl = strchr(line, '\r'); if (nl) *nl = 0;
@@ -135,6 +141,20 @@ static int read_conf(char * ticker, size_t tlen, char * name, size_t nlen) {
             snprintf(ticker, tlen, "%s", line + 7);
         } else if (strncmp(line, "NAME=", 5) == 0) {
             snprintf(name, nlen, "%s", line + 5);
+        } else if (strncmp(line, "TIMEFRAME=", 10) == 0) {
+            snprintf(tf, tflen, "%s", line + 10);
+        } else if (strncmp(line, "FAV=", 4) == 0 && g_fav_count < MAX_FAVS) {
+            char * v = line + 4;
+            char * comma = strchr(v, ',');
+            if (comma) {
+                *comma = 0;
+                snprintf(g_fav_tickers[g_fav_count], sizeof(g_fav_tickers[0]), "%s", v);
+                snprintf(g_fav_names[g_fav_count], sizeof(g_fav_names[0]), "%s", comma + 1);
+            } else {
+                snprintf(g_fav_tickers[g_fav_count], sizeof(g_fav_tickers[0]), "%s", v);
+                snprintf(g_fav_names[g_fav_count], sizeof(g_fav_names[0]), "%s", v);
+            }
+            g_fav_count++;
         }
     }
     fclose(f);
@@ -144,6 +164,7 @@ static int read_conf(char * ticker, size_t tlen, char * name, size_t nlen) {
         if (!strcmp(ticker, "^AEX")) snprintf(name, nlen, "AEX-Index");
         else snprintf(name, nlen, "%s", ticker);
     }
+    if (!tf[0]) snprintf(tf, tflen, "1d");
     return 1;
 }
 
@@ -311,7 +332,7 @@ static int fetch_range_and_save(const char * ticker, const char * tf, const char
 
     char cmd[512];
     snprintf(cmd, sizeof(cmd),
-        "curl -s -m 12 -L -A 'Mozilla/5.0' 'https://query1.finance.yahoo.com/v8/finance/chart/%s?interval=%s&range=%s'",
+        "curl -s -m 10 -L -A 'Mozilla/5.0 (X11; Linux armv7l) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' 'https://query1.finance.yahoo.com/v8/finance/chart/%s?interval=%s&range=%s'",
         url_tk, interval, range);
 
     FILE * fp = popen(cmd, "r");
@@ -348,7 +369,7 @@ static int fetch_stock_quote(const char * ticker, const char * conf_name, quote_
 
     char cmd[512];
     snprintf(cmd, sizeof(cmd),
-        "curl -s -m 12 -L -A 'Mozilla/5.0' 'https://query1.finance.yahoo.com/v8/finance/chart/%s?interval=15m&range=1d'",
+        "curl -s -m 10 -L -A 'Mozilla/5.0 (X11; Linux armv7l) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' 'https://query1.finance.yahoo.com/v8/finance/chart/%s?interval=15m&range=1d'",
         url_tk);
 
     FILE * fp = popen(cmd, "r");
@@ -369,8 +390,13 @@ static int fetch_stock_quote(const char * ticker, const char * conf_name, quote_
         return 0;
     }
 
-    /* Extract metadata */
-    if (!parse_meta_num(buf, "regularMarketPrice", &q->price)) {
+    /* Extract price with fallbacks for closing rates when markets are closed */
+    if (!parse_meta_num(buf, "regularMarketPrice", &q->price) || q->price <= 0.0001) {
+        if (!parse_meta_num(buf, "chartPreviousClose", &q->price)) {
+            parse_meta_num(buf, "previousClose", &q->price);
+        }
+    }
+    if (q->price <= 0.0001) {
         free(buf);
         return 0;
     }
@@ -417,36 +443,70 @@ static int fetch_stock_quote(const char * ticker, const char * conf_name, quote_
 }
 
 static void persist_state(const quote_data_t * q) {
-    FILE * f = fopen(STATE_PATH, "w");
-    if (!f) return;
+    char safe_tk[64];
+    make_safe_ticker(q->ticker, safe_tk, sizeof(safe_tk));
 
-    fprintf(f, "{\n");
-    fprintf(f, "  \"ticker\": \"%s\",\n", q->ticker);
-    fprintf(f, "  \"name\": \"%s\",\n", q->name);
-    fprintf(f, "  \"title\": \"%s\",\n", q->display_title);
-    fprintf(f, "  \"currency\": \"%s\",\n", q->currency);
-    fprintf(f, "  \"price\": %.4f,\n", q->price);
-    fprintf(f, "  \"prev_close\": %.4f,\n", q->prev_close);
-    fprintf(f, "  \"change\": %.4f,\n", q->change);
-    fprintf(f, "  \"change_pct\": %.4f,\n", q->change_pct);
-    fprintf(f, "  \"day_high\": %.4f,\n", q->day_high);
-    fprintf(f, "  \"day_low\": %.4f,\n", q->day_low);
-    fprintf(f, "  \"high_52w\": %.4f,\n", q->high_52w);
-    fprintf(f, "  \"low_52w\": %.4f,\n", q->low_52w);
-    fprintf(f, "  \"value\": \"%s\",\n", q->formatted_val);
-    fprintf(f, "  \"subtitle\": \"%s\",\n", q->formatted_sub);
-    fprintf(f, "  \"market_time\": %ld,\n", q->market_time);
-    fprintf(f, "  \"updated\": %ld\n", (long)time(NULL));
-    fprintf(f, "}\n");
-    fclose(f);
+    /* 1. Write active state.json */
+    FILE * f = fopen(STATE_PATH, "w");
+    if (f) {
+        fprintf(f, "{\n");
+        fprintf(f, "  \"ticker\": \"%s\",\n", q->ticker);
+        fprintf(f, "  \"name\": \"%s\",\n", q->name);
+        fprintf(f, "  \"title\": \"%s\",\n", q->display_title);
+        fprintf(f, "  \"currency\": \"%s\",\n", q->currency);
+        fprintf(f, "  \"price\": %.4f,\n", q->price);
+        fprintf(f, "  \"prev_close\": %.4f,\n", q->prev_close);
+        fprintf(f, "  \"change\": %.4f,\n", q->change);
+        fprintf(f, "  \"change_pct\": %.4f,\n", q->change_pct);
+        fprintf(f, "  \"day_high\": %.4f,\n", q->day_high);
+        fprintf(f, "  \"day_low\": %.4f,\n", q->day_low);
+        fprintf(f, "  \"high_52w\": %.4f,\n", q->high_52w);
+        fprintf(f, "  \"low_52w\": %.4f,\n", q->low_52w);
+        fprintf(f, "  \"value\": \"%s\",\n", q->formatted_val);
+        fprintf(f, "  \"subtitle\": \"%s\",\n", q->formatted_sub);
+        fprintf(f, "  \"market_time\": %ld,\n", q->market_time);
+        fprintf(f, "  \"updated\": %ld\n", (long)time(NULL));
+        fprintf(f, "}\n");
+        fclose(f);
+    }
+
+    /* 2. Write persistent per-ticker cache state_<safe_tk>.json */
+    char cache_path[256];
+    snprintf(cache_path, sizeof(cache_path), "%s/state_%s.json", BASE_DIR, safe_tk);
+    FILE * fc = fopen(cache_path, "w");
+    if (fc) {
+        fprintf(fc, "{\n");
+        fprintf(fc, "  \"ticker\": \"%s\",\n", q->ticker);
+        fprintf(fc, "  \"name\": \"%s\",\n", q->name);
+        fprintf(fc, "  \"title\": \"%s\",\n", q->display_title);
+        fprintf(fc, "  \"currency\": \"%s\",\n", q->currency);
+        fprintf(fc, "  \"price\": %.4f,\n", q->price);
+        fprintf(fc, "  \"prev_close\": %.4f,\n", q->prev_close);
+        fprintf(fc, "  \"change\": %.4f,\n", q->change);
+        fprintf(fc, "  \"change_pct\": %.4f,\n", q->change_pct);
+        fprintf(fc, "  \"day_high\": %.4f,\n", q->day_high);
+        fprintf(fc, "  \"day_low\": %.4f,\n", q->day_low);
+        fprintf(fc, "  \"high_52w\": %.4f,\n", q->high_52w);
+        fprintf(fc, "  \"low_52w\": %.4f,\n", q->low_52w);
+        fprintf(fc, "  \"value\": \"%s\",\n", q->formatted_val);
+        fprintf(fc, "  \"subtitle\": \"%s\",\n", q->formatted_sub);
+        fprintf(fc, "  \"market_time\": %ld,\n", q->market_time);
+        fprintf(fc, "  \"updated\": %ld\n", (long)time(NULL));
+        fprintf(fc, "}\n");
+        fclose(fc);
+    }
 }
 
-static void fetch_all_timeframes(const char * ticker) {
-    fprintf(stderr, "[stocks_daemon] fetching all historical timeframes for %s...\n", ticker);
-    fetch_range_and_save(ticker, "5d",  "15m", "5d");
-    fetch_range_and_save(ticker, "1mo", "1d",  "1mo");
-    fetch_range_and_save(ticker, "6mo", "1d",  "6mo");
-    fetch_range_and_save(ticker, "1y",  "1d",  "1y");
+static void fetch_requested_timeframe(const char * ticker, const char * tf) {
+    if (!strcmp(tf, "5d")) {
+        fetch_range_and_save(ticker, "5d",  "15m", "5d");
+    } else if (!strcmp(tf, "1mo")) {
+        fetch_range_and_save(ticker, "1mo", "1d",  "1mo");
+    } else if (!strcmp(tf, "6mo")) {
+        fetch_range_and_save(ticker, "6mo", "1d",  "6mo");
+    } else if (!strcmp(tf, "1y")) {
+        fetch_range_and_save(ticker, "1y",  "1d",  "1y");
+    }
 }
 
 int main(int argc, char ** argv) {
@@ -456,10 +516,10 @@ int main(int argc, char ** argv) {
 
     fprintf(stderr, "[stocks_daemon] starting FreeToon Stocks Daemon...\n");
     ensure_conf_exists();
-    read_conf(g_curr_ticker, sizeof(g_curr_ticker), g_curr_name, sizeof(g_curr_name));
+    read_conf(g_curr_ticker, sizeof(g_curr_ticker), g_curr_name, sizeof(g_curr_name), g_curr_tf, sizeof(g_curr_tf));
 
     int elapsed_poll = POLL_INTERVAL_S;  /* fetch immediately */
-    int elapsed_hist = HIST_INTERVAL_S;  /* fetch hist immediately */
+    int elapsed_hist = HIST_INTERVAL_S;
 
     char prev_ticker[32] = "";
 
@@ -476,11 +536,8 @@ int main(int argc, char ** argv) {
         }
 
         if (force_reload) {
-            read_conf(g_curr_ticker, sizeof(g_curr_ticker), g_curr_name, sizeof(g_curr_name));
+            read_conf(g_curr_ticker, sizeof(g_curr_ticker), g_curr_name, sizeof(g_curr_name), g_curr_tf, sizeof(g_curr_tf));
             elapsed_poll = POLL_INTERVAL_S;
-            if (strcmp(prev_ticker, g_curr_ticker) != 0) {
-                elapsed_hist = HIST_INTERVAL_S;
-            }
         }
 
         if (elapsed_poll >= POLL_INTERVAL_S) {
@@ -491,11 +548,26 @@ int main(int argc, char ** argv) {
                 post_to_freetoon(q.display_title, q.formatted_val, q.formatted_sub);
                 snprintf(prev_ticker, sizeof(prev_ticker), "%s", g_curr_ticker);
             }
+
+            /* If non-1d timeframe is requested, fetch it now without blocking other tickers */
+            if (strcmp(g_curr_tf, "1d") != 0) {
+                fetch_requested_timeframe(g_curr_ticker, g_curr_tf);
+            }
+
             elapsed_poll = 0;
         }
 
+        /* Periodic background refresh of other favorite quotes every 10 min */
         if (elapsed_hist >= HIST_INTERVAL_S) {
-            fetch_all_timeframes(g_curr_ticker);
+            for (int i = 0; i < g_fav_count && g_running; i++) {
+                if (strcmp(g_fav_tickers[i], g_curr_ticker) != 0) {
+                    quote_data_t fq;
+                    if (fetch_stock_quote(g_fav_tickers[i], g_fav_names[i], &fq)) {
+                        persist_state(&fq);
+                    }
+                    sleep(2); /* gentle spacing to prevent rate limits */
+                }
+            }
             elapsed_hist = 0;
         }
 
