@@ -332,7 +332,7 @@ static int fetch_range_and_save(const char * ticker, const char * tf, const char
 
     char cmd[512];
     snprintf(cmd, sizeof(cmd),
-        "curl -s -m 10 -L -A 'Mozilla/5.0 (X11; Linux armv7l) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' 'https://query1.finance.yahoo.com/v8/finance/chart/%s?interval=%s&range=%s'",
+        "curl -s -m 10 -L -A 'Mozilla/5.0' 'https://query1.finance.yahoo.com/v8/finance/chart/%s?interval=%s&range=%s'",
         url_tk, interval, range);
 
     FILE * fp = popen(cmd, "r");
@@ -369,7 +369,7 @@ static int fetch_stock_quote_raw(const char * ticker, const char * conf_name, qu
 
     char cmd[512];
     snprintf(cmd, sizeof(cmd),
-        "curl -s -m 10 -L -A 'Mozilla/5.0 (X11; Linux armv7l) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' 'https://query1.finance.yahoo.com/v8/finance/chart/%s?interval=15m&range=1d'",
+        "curl -s -m 10 -L -A 'Mozilla/5.0' 'https://query1.finance.yahoo.com/v8/finance/chart/%s?interval=15m&range=1d'",
         url_tk);
 
     FILE * fp = popen(cmd, "r");
