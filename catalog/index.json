@@ -2,7 +2,7 @@
   "integrations": [
     {
       "id": "temperaturelogger",
-      "name": "Temperature Logger",
+      "name": "Temperatuur Logger",
       "version": "1.0.0",
       "description": "24-uurs temperatuurlogger met grafiek (kamer, setpoint, buiten).",
       "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/temperaturelogger.tgz"
