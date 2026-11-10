@@ -15,6 +15,16 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <pthread.h>
+#include "plugin_abi.h"
+
+/* Every settings field this plugin (screen_sonos.c + sonos.c) touches;
+ * toonui refuses to load us if any of them moved. tr() reads `language`. */
+FT_PLUGIN_DECLARE_ABI(
+    FT_SETTINGS_FIELD(language),
+    FT_SETTINGS_FIELD(home_light_mode),
+    FT_SETTINGS_FIELD(sonos_enabled),
+    FT_SETTINGS_FIELD(sonos_host),
+    FT_SETTINGS_FIELD(sonos_zone));
 
 static lv_obj_t * s_modal = NULL;
 static lv_obj_t * s_dd_zone = NULL;

@@ -42,7 +42,9 @@ EOF
         fi
 
         echo "Packaging $id -> $PACKAGES_DIR/$id.tgz ..."
-        (cd "$d" && tar czf "$PACKAGES_DIR/$id.tgz" .)
+        # root-owned, not group/world-writable: these files are extracted by root
+        # and the binaries are respawned by init as root.
+        (cd "$d" && tar --owner=0 --group=0 --numeric-owner --mode=go-w -czf "$PACKAGES_DIR/$id.tgz" .)
     fi
 done
 

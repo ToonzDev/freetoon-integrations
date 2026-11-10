@@ -81,15 +81,21 @@ static void make_safe_ticker(const char * src, char * dst, size_t maxlen) {
     dst[j] = 0;
 }
 
+/* The result is spliced into a single-quoted popen() curl URL, so only
+ * characters Yahoo tickers actually use are let through ("ASML.AS",
+ * "^AEX", "EURUSD=X", "BRK-B"); anything else (quotes, spaces, '/', '?')
+ * is dropped. stocks.conf is root-writable via the UI but must not be
+ * able to run commands. */
 static void make_url_ticker(const char * src, char * dst, size_t maxlen) {
     size_t j = 0;
     for (size_t i = 0; src[i] && j + 3 < maxlen; i++) {
-        if (src[i] == '^') {
+        unsigned char c = (unsigned char)src[i];
+        if (c == '^') {
             dst[j++] = '%';
             dst[j++] = '5';
             dst[j++] = 'E';
-        } else {
-            dst[j++] = src[i];
+        } else if (isalnum(c) || c == '.' || c == '-' || c == '_' || c == '=') {
+            dst[j++] = (char)c;
         }
     }
     dst[j] = 0;
@@ -142,7 +148,12 @@ static int read_conf(char * ticker, size_t tlen, char * name, size_t nlen, char 
         } else if (strncmp(line, "NAME=", 5) == 0) {
             snprintf(name, nlen, "%s", line + 5);
         } else if (strncmp(line, "TIMEFRAME=", 10) == 0) {
-            snprintf(tf, tflen, "%s", line + 10);
+            const char * v = line + 10;
+            /* Only known timeframes; anything else falls back to 1d. */
+            if (strcmp(v, "1d") && strcmp(v, "5d") && strcmp(v, "1mo") &&
+                strcmp(v, "6mo") && strcmp(v, "1y"))
+                v = "1d";
+            snprintf(tf, tflen, "%s", v);
         } else if (strncmp(line, "FAV=", 4) == 0 && g_fav_count < MAX_FAVS) {
             char * v = line + 4;
             char * comma = strchr(v, ',');
