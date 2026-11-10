@@ -228,7 +228,7 @@ static void clean_html_escapes(char * s) {
 }
 
 static void update_headline(void) {
-    FILE * fp = popen("/usr/bin/curl -s -4 -k --max-time 6 --connect-timeout 4 https://teletekst-data.nos.nl/json/101", "r");
+    FILE * fp = popen("/usr/bin/curl -s -4 --max-time 6 --connect-timeout 4 https://teletekst-data.nos.nl/json/101", "r");
     if (!fp) return;
 
     char buf[8192];

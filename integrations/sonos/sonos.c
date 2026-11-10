@@ -915,7 +915,7 @@ static void * art_download_worker(void * arg) {
 
     unlink(tmp);
     char cmd[640];
-    snprintf(cmd, sizeof cmd, "curl -s -L --connect-timeout 3 --max-time 6 -o %s '%s' 2>/dev/null", tmp, safe_url);
+    snprintf(cmd, sizeof cmd, "curl -s -L --connect-timeout 3 --max-time 6 -o %s --url '%s' 2>/dev/null", tmp, safe_url);
     int rc = system(cmd);
     bool ok = false;
     lv_color_t * tmp_big = malloc(sizeof(g_art_big_buf));
@@ -2129,6 +2129,72 @@ void sonos_get_spotify_config(sonos_spotify_cfg_t * cfg) {
     }
 }
 
+/* ---- Spotify HTTPS via curl, without the shell seeing any data ----------
+ * URL, headers, credentials and POST data go into a private (0600, mkstemp)
+ * curl config file read with -K. Nothing from the Spotify config or from
+ * API responses is ever spliced into the popen() command line, and the
+ * client secret / bearer token no longer show up in `ps`. TLS is verified
+ * (no -k): the Toon's CA bundle is kept current. */
+static void curl_cfg_put(FILE * f, const char * opt, const char * val) {
+    fprintf(f, "%s = \"", opt);
+    for (const unsigned char * p = (const unsigned char *)val; *p; p++) {
+        if (*p < 0x20 || *p == 0x7f) continue;           /* no newlines/control */
+        if (*p == '"' || *p == '\\') fputc('\\', f);
+        fputc(*p, f);
+    }
+    fputs("\"\n", f);
+}
+
+typedef struct {
+    FILE * fp;
+    char   cfg[32];
+} spot_req_t;
+
+/* header/userpwd/post_data may be NULL. Returns 0 and fills *r on success. */
+static int spot_popen(spot_req_t * r, const char * url, const char * header,
+                      const char * userpwd, const char * post_data, int max_time) {
+    r->fp = NULL;
+    snprintf(r->cfg, sizeof r->cfg, "/tmp/sonos_curl.XXXXXX");
+    int fd = mkstemp(r->cfg);
+    if (fd < 0) return -1;
+    FILE * f = fdopen(fd, "w");
+    if (!f) { close(fd); unlink(r->cfg); return -1; }
+    curl_cfg_put(f, "url", url);
+    if (header)    curl_cfg_put(f, "header", header);
+    if (userpwd)   curl_cfg_put(f, "user", userpwd);
+    if (post_data) curl_cfg_put(f, "data", post_data);
+    if (fclose(f) != 0) { unlink(r->cfg); return -1; }
+
+    char cmd[128];
+    snprintf(cmd, sizeof cmd,
+             "/usr/bin/curl -s -4 --max-time %d --connect-timeout 4 -K %s",
+             max_time, r->cfg);
+    r->fp = popen(cmd, "r");
+    if (!r->fp) { unlink(r->cfg); return -1; }
+    return 0;
+}
+
+static void spot_pclose(spot_req_t * r) {
+    if (r->fp) pclose(r->fp);
+    r->fp = NULL;
+    unlink(r->cfg);
+}
+
+/* Spotify ids (user, playlist) go into URL paths: percent-encode anything
+ * outside the unreserved set so an id can never add path/query parts. */
+static void spot_path_escape(const char * in, char * out, size_t outsz) {
+    static const char hex[] = "0123456789ABCDEF";
+    size_t o = 0;
+    for (const unsigned char * p = (const unsigned char *)in; *p && o + 4 < outsz; p++) {
+        if (isalnum(*p) || *p == '-' || *p == '_' || *p == '.' || *p == '~') {
+            out[o++] = (char)*p;
+        } else {
+            out[o++] = '%'; out[o++] = hex[*p >> 4]; out[o++] = hex[*p & 15];
+        }
+    }
+    out[o] = 0;
+}
+
 static char   s_spot_token[300] = {0};
 static time_t s_spot_token_expiry = 0;
 
@@ -2140,18 +2206,15 @@ static int get_spotify_token(const sonos_spotify_cfg_t * cfg, char * out, size_t
     }
     if (!cfg || !cfg->configured) return -1;
 
-    char cmd[512];
-    snprintf(cmd, sizeof cmd,
-        "/usr/bin/curl -s -4 -k --max-time 6 --connect-timeout 4 "
-        "-X POST 'https://accounts.spotify.com/api/token' "
-        "-d 'grant_type=client_credentials' -u '%s:%s'",
-        cfg->client_id, cfg->client_secret);
+    char userpwd[sizeof cfg->client_id + sizeof cfg->client_secret + 2];
+    snprintf(userpwd, sizeof userpwd, "%s:%s", cfg->client_id, cfg->client_secret);
 
-    FILE * fp = popen(cmd, "r");
-    if (!fp) return -1;
+    spot_req_t rq;
+    if (spot_popen(&rq, "https://accounts.spotify.com/api/token", NULL,
+                   userpwd, "grant_type=client_credentials", 6) != 0) return -1;
     char resp[1024];
-    size_t got = fread(resp, 1, sizeof(resp) - 1, fp);
-    pclose(fp);
+    size_t got = fread(resp, 1, sizeof(resp) - 1, rq.fp);
+    spot_pclose(&rq);
     resp[got] = 0;
 
     char tok[300] = "";
@@ -2231,19 +2294,17 @@ int sonos_get_source_items(sonos_source_t src, int spotify_user_idx, sonos_item_
         if (get_spotify_token(&cfg, token, sizeof token) != 0 || !token[0])
             return 0;
 
-        char cmd[512];
-        snprintf(cmd, sizeof cmd,
-            "/usr/bin/curl -s -4 -k --max-time 6 --connect-timeout 4 "
-            "-H 'Authorization: Bearer %s' "
-            "'https://api.spotify.com/v1/users/%s/playlists'",
-            token, cfg.user_ids[spotify_user_idx]);
+        char uid[200], url[300], auth[330];
+        spot_path_escape(cfg.user_ids[spotify_user_idx], uid, sizeof uid);
+        snprintf(url, sizeof url, "https://api.spotify.com/v1/users/%s/playlists", uid);
+        snprintf(auth, sizeof auth, "Authorization: Bearer %s", token);
 
-        FILE * fp = popen(cmd, "r");
-        if (!fp) return 0;
+        spot_req_t rq;
+        if (spot_popen(&rq, url, auth, NULL, NULL, 6) != 0) return 0;
         char * resp = malloc(32768);
-        if (!resp) { pclose(fp); return 0; }
-        size_t got = fread(resp, 1, 32767, fp);
-        pclose(fp);
+        if (!resp) { spot_pclose(&rq); return 0; }
+        size_t got = fread(resp, 1, 32767, rq.fp);
+        spot_pclose(&rq);
         resp[got] = 0;
         int count = parse_spotify_playlists(resp, items, max_items);
         free(resp);
@@ -2401,20 +2462,20 @@ static int get_spotify_playlist_tracks(const char * uri, sonos_track_t tracks[],
     int req_limit = max_tracks > 100 ? 100 : max_tracks;
     if (req_limit < 50) req_limit = 50;
 
-    char cmd[700];
-    snprintf(cmd, sizeof cmd,
-        "/usr/bin/curl -s -4 -k --max-time 10 --connect-timeout 4 "
-        "-H 'Authorization: Bearer %s' "
-        "'https://api.spotify.com/v1/playlists/%s/tracks?limit=%d&fields=items(track(name,uri,duration_ms,artists(name),album(name)))'",
-        token, id, req_limit);
+    char pid[200], url[400], auth[330];
+    spot_path_escape(id, pid, sizeof pid);
+    snprintf(url, sizeof url,
+        "https://api.spotify.com/v1/playlists/%s/tracks?limit=%d&fields=items(track(name,uri,duration_ms,artists(name),album(name)))",
+        pid, req_limit);
+    snprintf(auth, sizeof auth, "Authorization: Bearer %s", token);
 
-    FILE * fp = popen(cmd, "r");
-    if (!fp) return 0;
+    spot_req_t rq;
+    if (spot_popen(&rq, url, auth, NULL, NULL, 10) != 0) return 0;
     size_t bufsz = 131072; /* 128 KB */
     char * resp = malloc(bufsz);
-    if (!resp) { pclose(fp); return 0; }
-    size_t got = fread(resp, 1, bufsz - 1, fp);
-    pclose(fp);
+    if (!resp) { spot_pclose(&rq); return 0; }
+    size_t got = fread(resp, 1, bufsz - 1, rq.fp);
+    spot_pclose(&rq);
     resp[got] = 0;
 
     int count = 0;
@@ -2464,19 +2525,17 @@ int sonos_spotify_search(const char * query, sonos_search_result_t * result) {
     char esc_q[128];
     url_encode(query, esc_q, sizeof esc_q);
 
-    char cmd[512];
-    snprintf(cmd, sizeof cmd,
-        "/usr/bin/curl -s -4 -k --max-time 8 --connect-timeout 4 "
-        "-H 'Authorization: Bearer %s' "
-        "'https://api.spotify.com/v1/search?q=%s&type=track,album,playlist&limit=20'",
-        token, esc_q);
+    char url[300], auth[330];
+    snprintf(url, sizeof url,
+        "https://api.spotify.com/v1/search?q=%s&type=track,album,playlist&limit=20", esc_q);
+    snprintf(auth, sizeof auth, "Authorization: Bearer %s", token);
 
-    FILE * fp = popen(cmd, "r");
-    if (!fp) return 0;
+    spot_req_t rq;
+    if (spot_popen(&rq, url, auth, NULL, NULL, 8) != 0) return 0;
     char * resp = malloc(65536);
-    if (!resp) { pclose(fp); return 0; }
-    size_t got = fread(resp, 1, 65535, fp);
-    pclose(fp);
+    if (!resp) { spot_pclose(&rq); return 0; }
+    size_t got = fread(resp, 1, 65535, rq.fp);
+    spot_pclose(&rq);
     resp[got] = 0;
 
     const char * tr_sec = strstr(resp, "\"tracks\":");

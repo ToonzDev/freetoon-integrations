@@ -22,6 +22,7 @@
 #include "i18n.h"
 #include "settings.h"
 #include "theme.h"
+#include "plugin_abi.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,6 +30,10 @@
 #include <sys/stat.h>
 #include <ctype.h>
 #include <math.h>
+
+/* Settings fields this plugin touches; toonui refuses to load us if any moved. */
+FT_PLUGIN_DECLARE_ABI(
+    FT_SETTINGS_FIELD(home_light_mode));
 
 #define BASE_DIR        "/mnt/data/integrations/stocks"
 #define CONF_PATH       BASE_DIR "/stocks.conf"

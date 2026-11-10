@@ -18,11 +18,15 @@
 #include "i18n.h"
 #include "settings.h"
 #include "theme.h"
+#include "plugin_abi.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
 #include <ctype.h>
+
+/* Uses no settings fields (and no tr()). */
+FT_PLUGIN_DECLARE_ABI_NO_SETTINGS();
 
 #ifdef TOON1
 extern const lv_font_t font_teletekst_15;
@@ -539,7 +543,7 @@ static void * fetch_thread_func(void * arg) {
     snprintf(url, sizeof url, "https://teletekst-data.nos.nl/json/%s", page);
 
     char cmd[256];
-    snprintf(cmd, sizeof cmd, "/usr/bin/curl -s -4 -k --max-time 6 --connect-timeout 4 '%s'", url);
+    snprintf(cmd, sizeof cmd, "/usr/bin/curl -s -4 --max-time 6 --connect-timeout 4 '%s'", url);
 
     FILE * fp = popen(cmd, "r");
     if (!fp) {
@@ -639,6 +643,11 @@ static void on_page_link_click(lv_event_t * e) {
 
 static void teletekst_request_page(const char * page) {
     if (!page || !page[0]) return;
+    /* Page ids come from the keypad but also from links in the fetched
+     * JSON, and end up in a popen() curl URL: digits and '-' only
+     * ("101", "102-2"). */
+    for (const char * c = page; *c; c++)
+        if (!isdigit((unsigned char)*c) && *c != '-') return;
     snprintf(s_req_page, sizeof s_req_page, "%s", page);
     s_state.is_loading = 1;
     s_state.has_error = 0;
