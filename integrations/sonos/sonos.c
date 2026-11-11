@@ -51,7 +51,7 @@ static int                g_poll_fail_count = 0;
 typedef struct {
     char title[64];
     char uri[256];
-    char meta[512];
+    char meta[1024];   /* raw DIDL; TuneIn entries are ~600 bytes */
 } sonos_fav_entry_t;
 
 static sonos_fav_entry_t g_favs[SONOS_MAX_ITEMS];
@@ -1466,7 +1466,7 @@ int sonos_get_favorites(char favs[][64], int max_favs) {
 
         char title[64] = "";
         char uri[256] = "";
-        char resMD[512] = "";
+        char resMD[2048] = "";   /* double-escaped in the Browse result: ~1 kB for TuneIn */
 
         extract_xml_tag(cur, "dc:title", title, sizeof title);
         extract_xml_tag(cur, "res", uri, sizeof uri);
@@ -1560,7 +1560,7 @@ static volatile int     s_enqueue_seq = 0;
 typedef struct {
     char name[64];
     char uri[384];
-    char meta[768];
+    char meta[1024];
 } fav_play_req_t;
 
 static void * fav_play_worker(void * arg) {
@@ -1577,16 +1577,17 @@ static void * fav_play_worker(void * arg) {
     char active_ip[32];
     snprintf(active_ip, sizeof active_ip, "%s", g_active_ip);
 
-    char esc_uri[384], esc_meta[768];
+    char esc_uri[512], esc_meta[2048];
     xml_escape(req->uri, esc_uri, sizeof esc_uri);
     xml_escape(req->meta, esc_meta, sizeof esc_meta);
 
-    char body[1280];
+    char body[3072];   /* fits sonos_soap()'s 4096-byte envelope */
     snprintf(body, sizeof body,
              "<InstanceID>0</InstanceID><CurrentURI>%s</CurrentURI><CurrentURIMetaData>%s</CurrentURIMetaData>",
              esc_uri, esc_meta);
 
-    fprintf(stderr, "[sonos] play_favorite starting for '%s'\n", req->name);
+    fprintf(stderr, "[sonos] play_favorite starting for '%s' (uri %zu B, meta %zu B)\n",
+            req->name, strlen(req->uri), strlen(req->meta));
 
     int rc_set = sonos_soap(active_ip, "/MediaRenderer/AVTransport/Control",
                             "urn:schemas-upnp-org:service:AVTransport:1",
