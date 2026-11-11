@@ -1,7 +1,7 @@
 {
   "id": "sonos",
   "name": "Sonos Player",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "binary": "freetoon-app-sonos",
   "args": [],
   "service_id": "sonosPlayer",
