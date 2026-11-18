@@ -1,0 +1,102 @@
+# Radiatoren-app op de Toon (FreeToon-integratie "radiatoren") -> radiatorknoppen in Home Assistant.
+# Zet dit in /config/packages/radiatoren.yaml en vervang TOON_IP door het adres van je Toon.
+#
+# Home Assistant haalt de doelen op bij de Toon (de Toon hoeft HA niet te bereiken). De app zet elke halve
+# minuut per kamer het doel van dat moment in http://TOON_IP/tsc/radiatoren.json.
+# Hier leest Home Assistant dat en zet elke thermostaat (climate.*) in de ruimte met dezelfde
+# naam als de kamer op dat doel (Z-Wave, Zigbee, Homey/MQTT: maakt niet uit, als het maar een
+# climate-entiteit in die ruimte is). De Toon zelf (climate.toon_thermostat) wordt overgeslagen.
+# Ketelsturing zit er bewust (nog) niet in: de ketel volgt het programma van de Toon.
+
+rest:
+  - resource: http://TOON_IP/tsc/radiatoren.json
+    scan_interval: 30
+    timeout: 10
+    sensor:
+      - name: "Toon radiatoren"
+        unique_id: toon_radiatoren
+        icon: mdi:radiator
+        value_template: "{{ value_json.rooms | count }}"
+        unit_of_measurement: kamers
+        json_attributes:
+          - rooms
+          - updated
+          - hysteresis
+
+input_boolean:
+  radiatoren_knoppen_sturen:
+    name: "Radiatorknoppen volgen de Toon"
+    icon: mdi:radiator
+
+template:
+  - binary_sensor:
+      - name: "Radiatoren-app actief"
+        unique_id: radiatoren_app_actief
+        icon: mdi:radiator
+        device_class: connectivity
+        # De app schrijft elke halve minuut; ouder dan 15 minuten betekent dat het scherm van de Toon stilstaat.
+        state: >-
+          {{ (state_attr('sensor.toon_radiatoren', 'updated') | int(0)) > (as_timestamp(now()) - 900) }}
+  - sensor:
+      - name: "Radiatorknoppen gekoppeld"
+        unique_id: radiatorknoppen_gekoppeld
+        icon: mdi:radiator
+        unit_of_measurement: knoppen
+        state: >-
+          {% set ns = namespace(n=0) %}
+          {% for kamer in state_attr('sensor.toon_radiatoren', 'rooms') or [] %}
+            {% set ns.n = ns.n + (area_entities(kamer.name) | select('match', 'climate\.') | reject('eq', 'climate.toon_thermostat') | list | count) %}
+          {% endfor %}
+          {{ ns.n }}
+        attributes:
+          per_kamer: >-
+            {% set ns = namespace(d={}) %}
+            {% for kamer in state_attr('sensor.toon_radiatoren', 'rooms') or [] %}
+              {% set ns.d = dict(ns.d, **{kamer.name: area_entities(kamer.name) | select('match', 'climate\.') | reject('eq', 'climate.toon_thermostat') | list}) %}
+            {% endfor %}
+            {{ ns.d }}
+
+automation:
+  - id: radiatoren_knoppen_volgen_toon
+    alias: "Radiatoren: knoppen volgen de Toon"
+    description: "Zet elke radiatorknop op het doel van zijn kamer in de Radiatoren-app op de Toon (ruimte = kamernaam)."
+    mode: queued
+    max: 3
+    triggers:
+      # Zonder to/from: ook een wijziging van alleen de attributen (doelen) start de automatisering.
+      - trigger: state
+        entity_id: sensor.toon_radiatoren
+      - trigger: time_pattern
+        minutes: "/5"
+      - trigger: state
+        entity_id: input_boolean.radiatoren_knoppen_sturen
+        to: "on"
+    conditions:
+      - condition: state
+        entity_id: input_boolean.radiatoren_knoppen_sturen
+        state: "on"
+      - condition: state
+        entity_id: binary_sensor.radiatoren_app_actief
+        state: "on"
+    actions:
+      - repeat:
+          for_each: "{{ state_attr('sensor.toon_radiatoren', 'rooms') or [] }}"
+          sequence:
+            - variables:
+                doel: "{{ repeat.item.target | float(0) }}"
+                knoppen: >-
+                  {{ area_entities(repeat.item.name) | select('match', 'climate\.')
+                     | reject('eq', 'climate.toon_thermostat') | reject('is_state', 'unavailable') | list }}
+            - repeat:
+                for_each: "{{ knoppen }}"
+                sequence:
+                  - if:
+                      - condition: template
+                        value_template: "{{ doel > 0 and ((state_attr(repeat.item, 'temperature') | float(-100)) - doel) | abs > 0.05 }}"
+                    then:
+                      - action: climate.set_temperature
+                        continue_on_error: true
+                        target:
+                          entity_id: "{{ repeat.item }}"
+                        data:
+                          temperature: "{{ doel }}"

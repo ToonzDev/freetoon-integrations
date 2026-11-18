@@ -69,7 +69,14 @@
       "version": "1.0.0",
       "description": "Deurbel- en camerameldingen via webhook op poort 8765 en live video overlay.",
       "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/camera.tgz"
+    },
+    {
+      "id": "radiatoren",
+      "name": "Radiatoren",
+      "version": "0.3.2",
+      "description": "Per kamer een comfort-/ecotemperatuur en weekschema; Home Assistant stuurt de radiatorknoppen in de ruimte met dezelfde naam.",
+      "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/radiatoren.tgz",
+      "min_toonui": "1.0.12"
     }
   ]
 }
-

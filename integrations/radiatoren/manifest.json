@@ -1,0 +1,24 @@
+{
+  "id": "radiatoren",
+  "name": "Radiatoren",
+  "version": "0.3.2",
+  "binary": "radiatoren",
+  "args": [],
+  "service_id": "radiatoren",
+  "tile": {
+    "title": "Radiatoren",
+    "color": "0xff8866",
+    "icon": "radiator",
+    "value_field": "value",
+    "value_unit": "",
+    "subtitle_field": "subtitle",
+    "subtitle_unit": ""
+  },
+  "detail_screen": {
+    "type": "plugin",
+    "library": "radiatoren_ui.so",
+    "entry": "screen_create"
+  },
+  "description": "Kamers met een eigen temperatuur en weekschema. Radiatorknoppen stuur je via Home Assistant (ruimte met dezelfde naam als de kamer).",
+  "license": "MIT"
+}

@@ -1,0 +1,15 @@
+#!/bin/sh
+# Radiatoren launcher (manifest.json "binary"). init respawns this from the
+# inittab row integrations-install.sh writes; it runs the build for this Toon.
+DIR="$(dirname "$0")"
+case "$(uname -m)" in
+    armv5*)
+        if [ -x "$DIR/radiatoren.toon1" ]; then exec "$DIR/radiatoren.toon1" "$@"; fi
+        echo "radiatoren: no Toon 1 build in this package" >&2
+        # Do not respawn-storm init: idle instead of exiting.
+        while true; do sleep 3600; done
+        ;;
+    *)
+        exec "$DIR/radiatoren.toon2" "$@"
+        ;;
+esac

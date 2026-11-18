@@ -24,6 +24,7 @@ freetoon-integrations/
 |---|---|---|---|
 | `temperaturelogger` | Temperature Logger | 1.0.0 | 24-uurs temperatuurlogger met grafiek (kamer, setpoint, buiten). |
 | `crypto` | Crypto Tracker | 1.0.0 | Live crypto koersen en 24h verandering via CoinGecko API. |
+| `radiatoren` | Radiatoren | 0.3.0 | Per kamer comfort/eco + weekschema; radiatorknoppen via Home Assistant (ruimte = kamernaam). |
 
 ## Adding an Integration
 
