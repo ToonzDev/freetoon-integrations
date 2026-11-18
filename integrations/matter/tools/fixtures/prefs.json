@@ -1,0 +1,6 @@
+{
+  "schema": "nl.toon.matter-bridge/preferences-v1",
+  "selected_devices": {
+    "toon-thermostat": true
+  }
+}

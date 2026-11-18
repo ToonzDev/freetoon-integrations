@@ -1,0 +1,24 @@
+{
+  "id": "matter",
+  "name": "Matter Bridge",
+  "version": "1.0.0",
+  "binary": "freetoon-app-matter",
+  "args": [],
+  "service_id": "matter",
+  "tile": {
+    "title": "Matter",
+    "color": "0x44aaff",
+    "icon": "link",
+    "value_field": "value",
+    "value_unit": "",
+    "subtitle_field": "subtitle",
+    "subtitle_unit": ""
+  },
+  "detail_screen": {
+    "type": "plugin",
+    "library": "matter_ui.so",
+    "entry": "screen_create"
+  },
+  "description": "Koppelscherm voor de Matter Bridge: QR-code en koppelcode voor Apple Woning of Google Home, apparaten kiezen, service herstarten en koppeling wissen. Vereist de Matter Bridge-service (Toon 2).",
+  "license": "MIT"
+}

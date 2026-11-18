@@ -1,0 +1,11 @@
+{
+  "schema": "nl.toon.matter-bridge/status-v1",
+  "running": true,
+  "commissioned": true,
+  "message": "2 apparaten via Matter gedeeld; gekoppeld met Google Home",
+  "pairing_code": "",
+  "qr_payload": "",
+  "qr_image": "",
+  "selected_count": 2,
+  "energy": { "available": true, "online": true, "import_power_w": 0, "export_power_w": 1240, "net_power_w": -1240, "gas_flow_lph": 0 }
+}

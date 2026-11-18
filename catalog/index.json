@@ -43,6 +43,14 @@
       "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/homeassistant.tgz"
     },
     {
+      "id": "matter",
+      "name": "Matter Bridge",
+      "version": "1.0.0",
+      "description": "Koppelscherm voor de Matter Bridge (Apple Woning, Google Home). Vereist de Matter Bridge-service (Toon 2).",
+      "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/matter.tgz",
+      "min_toonui": "1.0.12"
+    },
+    {
       "id": "agenda",
       "name": "Agenda & Kalender",
       "version": "1.0.0",
