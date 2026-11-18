@@ -69,6 +69,13 @@
       "version": "1.0.0",
       "description": "Deurbel- en camerameldingen via webhook op poort 8765 en live video overlay.",
       "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/camera.tgz"
+    },
+    {
+      "id": "bambuddy",
+      "name": "3D-printer (BamBuddy)",
+      "version": "1.0.0",
+      "description": "Printerstatus uit BamBuddy: voortgang, resterende tijd, temperaturen, AMS en een miniatuur.",
+      "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/bambuddy.tgz"
     }
   ]
 }

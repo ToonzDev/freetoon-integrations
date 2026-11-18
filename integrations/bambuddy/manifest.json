@@ -1,0 +1,25 @@
+{
+  "id": "bambuddy",
+  "name": "3D-printer (BamBuddy)",
+  "version": "1.0.0",
+  "binary": "bambuddy",
+  "args": [],
+  "service_id": "bambuddy",
+  "tile": {
+    "title": "3D-printer",
+    "color": "0x00ae42",
+    "icon": "printer",
+    "value_field": "value",
+    "value_unit": "",
+    "subtitle_field": "subtitle",
+    "subtitle_unit": "",
+    "alert_field": "alert"
+  },
+  "detail_screen": {
+    "type": "plugin",
+    "library": "bambuddy_ui.so",
+    "entry": "screen_create"
+  },
+  "description": "Printerstatus uit BamBuddy: voortgang, resterende tijd, bestand, nozzle- en bedtemperatuur, AMS en een miniatuur. Melding als de print klaar is.",
+  "license": "MIT"
+}
