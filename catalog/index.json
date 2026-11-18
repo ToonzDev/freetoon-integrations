@@ -69,6 +69,13 @@
       "version": "1.0.0",
       "description": "Deurbel- en camerameldingen via webhook op poort 8765 en live video overlay.",
       "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/camera.tgz"
+    },
+    {
+      "id": "ns",
+      "name": "NS Vertrektijden",
+      "version": "1.0.0",
+      "description": "De eerstvolgende treinen vanaf je station met vertraging en spoorwijziging (eigen NS API-sleutel).",
+      "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/ns.tgz"
     }
   ]
 }

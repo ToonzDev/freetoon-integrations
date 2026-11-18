@@ -1,0 +1,24 @@
+{
+  "id": "ns",
+  "name": "NS Vertrektijden",
+  "version": "1.0.0",
+  "binary": "ns",
+  "args": [],
+  "service_id": "ns",
+  "tile": {
+    "title": "Trein",
+    "color": "0xffc917",
+    "icon": "train",
+    "value_field": "value",
+    "value_unit": "",
+    "subtitle_field": "subtitle",
+    "subtitle_unit": ""
+  },
+  "detail_screen": {
+    "type": "plugin",
+    "library": "ns_ui.so",
+    "entry": "screen_create"
+  },
+  "description": "De eerstvolgende treinen vanaf je station, met richting, vertraging en spoorwijziging. Vraagt een gratis NS API-sleutel (apiportal.ns.nl).",
+  "license": "MIT"
+}
