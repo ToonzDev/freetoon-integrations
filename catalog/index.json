@@ -69,6 +69,13 @@
       "version": "1.0.0",
       "description": "Deurbel- en camerameldingen via webhook op poort 8765 en live video overlay.",
       "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/camera.tgz"
+    },
+    {
+      "id": "homey",
+      "name": "Homey Flows",
+      "version": "1.0.0",
+      "description": "Start Homey-flows met een tik en zie of schakel een paar apparaten via de lokale Homey-API.",
+      "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/homey.tgz"
     }
   ]
 }

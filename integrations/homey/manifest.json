@@ -1,0 +1,24 @@
+{
+  "id": "homey",
+  "name": "Homey Flows",
+  "version": "1.0.0",
+  "binary": "homey",
+  "args": [],
+  "service_id": "homey",
+  "tile": {
+    "title": "Homey",
+    "color": "0x8c5cf0",
+    "icon": "home",
+    "value_field": "value",
+    "value_unit": "",
+    "subtitle_field": "subtitle",
+    "subtitle_unit": ""
+  },
+  "detail_screen": {
+    "type": "plugin",
+    "library": "homey_ui.so",
+    "entry": "screen_create"
+  },
+  "description": "Start gekozen Homey-flows met een tik en zie of schakel een paar apparaten, via de lokale Homey-API.",
+  "license": "MIT"
+}
