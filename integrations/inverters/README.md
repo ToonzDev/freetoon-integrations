@@ -38,4 +38,10 @@ make TARGET=toon2 && make TARGET=toon1 OUT=freetoon-app-inverters.toon1
 make test     # parsers + signature on the build host, synthetic fixtures
 ```
 
-Needs a FreeToon core with `/api/v1/solar/source` and the `/solar` page.
+Needs FreeToon 1.0.18 or newer (`/api/v1/solar/source` and the `/solar`
+page). The catalog entry carries `"min_toonui": "1.0.18"`, so older Toons
+(1.0.8+) show "Vereist 1.0.18" in the Marketplace instead of installing. If it
+gets installed anyway (the `/api/install` route, or a Toon older than 1.0.8),
+the core answers the source post with 404 (401 with the web login on) and the
+app's tile says "Vereist FreeToon 1.0.18". Keep `MIN_CORE` in
+`inverters_daemon.c` and `min_toonui` in the catalog in step.

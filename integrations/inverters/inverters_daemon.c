@@ -38,6 +38,7 @@
 #define APP_ID      "inverters"
 #define DEF_DIR     "/mnt/data/integrations/" APP_ID
 #define CONF_NAME   "inverters.conf"
+#define MIN_CORE    "1.0.18"      /* first core with /api/v1/solar/source; keep in step with catalog min_toonui */
 #define TOKEN_CACHE "envoy_token.cache"
 #define RESP_MAX    (256 * 1024)
 
@@ -251,9 +252,11 @@ static void json_esc(const char * s, char * out, size_t n) {
 }
 
 /* ---------------------------------------------------------- the core */
-static void core_post(const char * path, const char * body) {
+/* Returns the core's HTTP status, 0 when it could not be reached. */
+static int core_post(const char * path, const char * body) {
+    int status = 0;
     int s = socket(AF_INET, SOCK_STREAM, 0);
-    if (s < 0) return;
+    if (s < 0) return 0;
     struct sockaddr_in a;
     memset(&a, 0, sizeof a);
     a.sin_family = AF_INET;
@@ -270,12 +273,17 @@ static void core_post(const char * path, const char * body) {
             path, g_core_host, g_core_port, (int)strlen(body), body);
         if (n > 0 && n < (int)sizeof req) {
             if (send(s, req, (size_t)n, 0) == n) {
-                char junk[256];
-                (void)!recv(s, junk, sizeof junk, 0);   /* wait for the answer, then close */
+                char resp[256];
+                ssize_t r = recv(s, resp, sizeof resp - 1, 0);   /* wait for the answer, then close */
+                if (r > 0) {
+                    resp[r] = 0;
+                    if (sscanf(resp, "HTTP/%*d.%*d %d", &status) != 1) status = 0;
+                }
             }
         }
     }
     close(s);
+    return status;
 }
 
 static void fmt_kwh(double wh, char * out, size_t n) {
@@ -290,10 +298,22 @@ static void report(int ok, const inv_reading_t * r, const char * msg) {
         "{\"app\":\"" APP_ID "\",\"brand\":\"%s\",\"ok\":%d,\"power_w\":%.0f,"
         "\"today_wh\":%.0f,\"total_wh\":%.0f,\"msg\":\"%s\"}",
         g_conf.type, ok, ok ? r->power_w : 0.0, ok ? r->today_wh : -1.0, ok ? r->total_wh : -1.0, m);
-    core_post("/api/v1/solar/source", body);
+    int st = core_post("/api/v1/solar/source", body);
+    /* A core before 1.0.18 has no solar source endpoint (404, or 401 when its
+     * web login is on, as the path is not public there): the readings go
+     * nowhere and the /solar settings page does not exist. Say so on the tile;
+     * the catalog's min_toonui only stops installs from the panel. */
+    static int old_core_logged;
+    int old_core = (st == 404 || st == 401);
+    if (old_core && !old_core_logged)
+        logf_("FreeToon core has no /api/v1/solar/source (HTTP %d): needs %s or newer", st, MIN_CORE);
+    old_core_logged = old_core;
 
     char val[32], sub[80], tile[220];
-    if (ok) {
+    if (old_core) {
+        snprintf(val, sizeof val, "-");
+        snprintf(sub, sizeof sub, "Vereist FreeToon %s", MIN_CORE);
+    } else if (ok) {
         snprintf(val, sizeof val, "%.0f W", r->power_w);
         if (r->today_wh >= 0) {
             char k[48];

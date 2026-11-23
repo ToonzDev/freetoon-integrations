@@ -1,5 +1,2 @@
 tests/test_drivers
 tests/freetoon-app-inverters.host
-# built by scripts/package.sh
-freetoon-app-inverters.toon1
-freetoon-app-inverters.toon2
