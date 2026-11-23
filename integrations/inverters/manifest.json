@@ -1,0 +1,50 @@
+{
+  "id": "inverters",
+  "name": "Omvormers",
+  "version": "0.1.0",
+  "binary": "freetoon-app-inverters",
+  "args": [],
+  "service_id": "inverters",
+  "solar_source": true,
+  "tile": {
+    "title": "Omvormer",
+    "color": "0xeeaa22",
+    "icon": "sun",
+    "value_field": "power",
+    "value_unit": "",
+    "subtitle_field": "today",
+    "subtitle_unit": ""
+  },
+  "settings": {
+    "file": "inverters.conf",
+    "title": "Omvormer",
+    "intro": "Leest je omvormer rechtstreeks uit. FreeToon gebruikt deze meting voor de Zon-tegel, het dimscherm en de statistieken.",
+    "fields": [
+      { "key": "TYPE", "label": "Merk", "type": "select", "options": [
+          { "value": "", "label": "Geen" },
+          { "value": "enphase", "label": "Enphase Envoy (lokaal)" },
+          { "value": "solis_local", "label": "Solis / Ginlong wifi-stick (lokaal)" },
+          { "value": "soliscloud", "label": "SolisCloud (cloud, API-sleutel)" },
+          { "value": "omnik", "label": "Omnik wifi-stick (lokaal)" }
+      ] },
+      { "key": "HOST", "label": "IP-adres", "type": "text", "placeholder": "192.168.1.60",
+        "show": "TYPE=enphase|solis_local|omnik", "guards": "ENVOY_TOKEN,STICK_PASS" },
+      { "key": "ENVOY_TOKEN", "label": "Token (Envoy-firmware 7 of hoger)", "type": "secret",
+        "show": "TYPE=enphase",
+        "help": "Niet nodig bij oudere firmware. Haal een token op via entrez.enphaseenergy.com, of laat dit leeg en vul hieronder je Enlighten-account in: dan haalt de app zelf een token op." },
+      { "key": "ENLIGHTEN_USER", "label": "Enlighten e-mail (optioneel)", "type": "text", "show": "TYPE=enphase" },
+      { "key": "ENLIGHTEN_PASS", "label": "Enlighten wachtwoord (optioneel)", "type": "secret", "show": "TYPE=enphase" },
+      { "key": "STICK_USER", "label": "Gebruikersnaam van de stick", "type": "text", "default": "admin",
+        "show": "TYPE=solis_local|omnik" },
+      { "key": "STICK_PASS", "label": "Wachtwoord van de stick", "type": "secret", "default": "admin",
+        "show": "TYPE=solis_local|omnik", "help": "Meestal admin / admin. Test vooraf in je browser: http://<ip>/status.html (Solis) of http://<ip>/js/status.js (oudere Omnik)." },
+      { "key": "SOLIS_KEY_ID", "label": "KeyId", "type": "text", "show": "TYPE=soliscloud",
+        "help": "Vraag API-toegang aan bij Solis (SolisCloud > Account > Basisinstellingen > API-beheer); je krijgt een KeyId en KeySecret." },
+      { "key": "SOLIS_KEY_SECRET", "label": "KeySecret", "type": "secret", "show": "TYPE=soliscloud" },
+      { "key": "SOLIS_API", "label": "API-adres", "type": "text", "default": "https://www.soliscloud.com:13333",
+        "show": "TYPE=soliscloud" }
+    ]
+  },
+  "description": "Leest je omvormer uit (Enphase, Solis, Omnik) voor de Zon-tegel, het dimscherm en de statistieken.",
+  "license": "MIT"
+}

@@ -1,0 +1,17 @@
+# Normally written by FreeToon's web page (http://<toon>:10081/solar).
+# TYPE: enphase | solis_local | soliscloud | omnik
+TYPE=enphase
+HOST=192.168.1.60
+# Enphase firmware 7+: a token, or the Enlighten account so the app fetches one
+ENVOY_TOKEN=
+ENLIGHTEN_USER=
+ENLIGHTEN_PASS=
+# Solis / Omnik wifi stick
+STICK_USER=admin
+STICK_PASS=admin
+# SolisCloud
+SOLIS_KEY_ID=
+SOLIS_KEY_SECRET=
+SOLIS_API=https://www.soliscloud.com:13333
+# Poll interval in seconds (10..600), default 30
+INTERVAL=30
