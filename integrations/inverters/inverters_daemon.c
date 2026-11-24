@@ -32,6 +32,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -136,11 +137,25 @@ static int host_ok(const char * h) {
 /* --------------------------------------------------------------- HTTP */
 typedef struct {
     int    code;     /* HTTP status, 0 = no connection */
+    int    curl;     /* curl's exit code (0 = ok; 7 refused, 28 time-out, 35 TLS, ...) */
     char * body;     /* NUL-terminated, malloc'd (free with resp_free) */
     size_t len;
 } resp_t;
 
 static void resp_free(resp_t * r) { free(r->body); r->body = NULL; r->len = 0; }
+
+/* Why a request got no HTTP answer, in words, from curl's exit code. */
+static const char * curl_why(int rc) {
+    switch (rc) {
+    case 6:  return "adres onbekend";
+    case 7:  return "verbinding geweigerd";
+    case 28: return "geen antwoord (time-out)";
+    case 35: return "TLS-fout";
+    case 52: return "leeg antwoord";
+    case 56: return "verbinding verbroken";
+    default: return "geen verbinding";
+    }
+}
 
 /* Quoted value for a curl config file. */
 static void cfg_q(FILE * f, const char * key, const char * v) {
@@ -208,7 +223,8 @@ static int http_req(const char * url, const char * const * headers, const char *
         if (!k) break;
         n += k;
     }
-    pclose(p);
+    int st = pclose(p);
+    r->curl = (st != -1 && WIFEXITED(st)) ? WEXITSTATUS(st) : -1;
     unlink(cfg);
     buf[n] = 0;
     /* last line = status code from write-out */
@@ -224,7 +240,7 @@ static int http_req(const char * url, const char * const * headers, const char *
     }
     r->body = buf;
     r->len = n;
-    if (getenv("INV_DEBUG")) logf_("http %s -> %d (%u bytes)", url, r->code, (unsigned)n);
+    if (getenv("INV_DEBUG")) logf_("http %s -> %d (%u bytes, curl %d)", url, r->code, (unsigned)n, r->curl);
     return 0;
 }
 
@@ -436,19 +452,28 @@ static int envoy_fetch_token(char * msg, size_t msgn) {
 static int poll_enphase(inv_reading_t * rd, char * msg, size_t msgn) {
     char url[256];
     resp_t r;
+    char http_why[64] = "";        /* plain HTTP gave no answer at all: why */
     if (g_envoy_mode != 2) {
         snprintf(url, sizeof url, "http://%s/api/v1/production", g_conf.host);
         if (http_req(url, NULL, NULL, NULL, 0, 10, &r) != 0) { snprintf(msg, msgn, "curl ontbreekt"); return 0; }
         int ok = r.code == 200 && inv_parse_envoy_v1(r.body, rd);
-        int code = r.code;
+        int code = r.code, crc = r.curl;
         resp_free(&r);
         if (ok) {
             if (g_envoy_mode != 1) logf_("Enphase: firmware < 7, plain HTTP");
             g_envoy_mode = 1;
             return 1;
         }
-        if (code == 0) { snprintf(msg, msgn, "Envoy niet bereikbaar op %s", g_conf.host); return 0; }
-        if (g_envoy_mode != 2) logf_("Enphase: HTTP %d on plain HTTP, switching to HTTPS + token (firmware 7+)", code);
+        /* No answer on port 80 at all: newer firmware (D8.x) may have plain
+         * HTTP closed and only HTTPS open, so try HTTPS + token as well before
+         * calling the Envoy unreachable (user report, firmware D8.3.6022). */
+        static int http_dead_logged;   /* log once, not every poll */
+        if (code == 0) {
+            snprintf(http_why, sizeof http_why, "%s", curl_why(crc));
+            if (!http_dead_logged) logf_("Enphase: no answer on plain HTTP (curl %d), trying HTTPS + token", crc);
+            http_dead_logged = 1;
+        } else if (g_envoy_mode != 2)
+            logf_("Enphase: HTTP %d on plain HTTP, switching to HTTPS + token (firmware 7+)", code);
         g_envoy_mode = 2;
     }
 
@@ -478,7 +503,7 @@ static int poll_enphase(inv_reading_t * rd, char * msg, size_t msgn) {
     snprintf(url, sizeof url, "https://%s/api/v1/production", g_conf.host);
     if (http_req(url, h, NULL, NULL, 1, 15, &r) != 0) { snprintf(msg, msgn, "curl ontbreekt"); return 0; }
     int ok = r.code == 200 && inv_parse_envoy_v1(r.body, rd);
-    int code = r.code;
+    int code = r.code, crc = r.curl;
     resp_free(&r);
     if (ok) return 1;
     if (code == 401 || code == 403) {
@@ -489,7 +514,11 @@ static int poll_enphase(inv_reading_t * rd, char * msg, size_t msgn) {
             token_cache_drop();
         }
     } else if (code == 0) {
-        snprintf(msg, msgn, "Envoy niet bereikbaar op %s", g_conf.host);
+        if (http_why[0])
+            snprintf(msg, msgn, "Envoy niet bereikbaar op %.64s (http: %.30s, https: %s)",
+                     g_conf.host, http_why, curl_why(crc));
+        else
+            snprintf(msg, msgn, "Envoy niet bereikbaar op %.64s via https (%s)", g_conf.host, curl_why(crc));
         g_envoy_mode = 0;          /* retry plain HTTP next time */
     } else snprintf(msg, msgn, "onverwacht antwoord van de Envoy (HTTP %d)", code);
     return 0;
