@@ -16,6 +16,7 @@ permission.
 | `solis_local` | WiFi data logger `/status.html` (basic auth, default admin/admin) | Older Solis / Ginlong sticks; falls back to `/js/status.js`. Not on newer "S3" sticks: use SolisCloud. |
 | `soliscloud` | SolisCloud API `/v1/api/userStationList` | Needs a KeyId + KeySecret requested from Solis. HMAC-SHA1 signed; first station. Polled every 2 min at most. |
 | `omnik` | Logger `/js/status.js` (`webData` / `myDeviceArray`), falls back to `/status.html` | The Omnik portal is gone; local only. |
+| `sunspec` | SunSpec over Modbus TCP (`MB_PORT`, `MB_UNIT`): SolarEdge, SMA, Fronius, Kostal and other SunSpec inverters | Finds the "SunS" marker at register 40000, 50000 or 0, walks the model chain to inverter model 101-103 (integer + scale factor) or 111-113 (float) and reads W (power) and WH (lifetime). One short connection per poll (SolarEdge serves one Modbus client at a time). Modbus TCP must be enabled on the inverter; SolarEdge: port 1502, reliable over a LAN cable, over WiFi only on some firmware. Typical unit ids: SolarEdge / Fronius 1, SMA 126, Kostal 71. Tested against a synthetic SunSpec server only (tests and `sunspec` e2e), not yet on a real inverter. |
 
 ## How it works
 

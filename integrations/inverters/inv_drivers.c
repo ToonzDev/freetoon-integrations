@@ -180,3 +180,99 @@ void inv_soliscloud_sign(const char * key_id, const char * key_secret, const cha
     inv_b64(mac, 20, macb);
     snprintf(auth, authn, "API %s:%s", key_id, macb);
 }
+
+/* ------------------------------------------------- SunSpec / Modbus TCP */
+
+int inv_modbus_req(uint8_t * o, uint16_t tid, uint8_t unit, uint16_t addr, uint16_t count) {
+    o[0] = (uint8_t)(tid >> 8);  o[1] = (uint8_t)tid;     /* transaction */
+    o[2] = 0; o[3] = 0;                                    /* protocol 0 */
+    o[4] = 0; o[5] = 6;                                    /* bytes after this */
+    o[6] = unit;
+    o[7] = 3;                                              /* read holding registers */
+    o[8] = (uint8_t)(addr >> 8); o[9] = (uint8_t)addr;
+    o[10] = (uint8_t)(count >> 8); o[11] = (uint8_t)count;
+    return 12;
+}
+
+int inv_modbus_resp(const uint8_t * in, int n, uint16_t tid, uint16_t count,
+                    uint16_t * regs, char * err, size_t errn) {
+    if (n < 9) { snprintf(err, errn, "kort Modbus-antwoord (%d bytes)", n); return 0; }
+    if (((in[0] << 8) | in[1]) != tid) { snprintf(err, errn, "Modbus-antwoord hoort bij een ander verzoek"); return 0; }
+    if (in[7] == 0x83) {
+        static const char * ex[] = { "", "functie niet ondersteund", "register bestaat niet",
+                                     "ongeldige waarde", "apparaatfout" };
+        int c = in[8];
+        if (c == 10 || c == 11)                  /* gateway: nobody answers on that unit id */
+            snprintf(err, errn, "Modbus-fout %d: geen apparaat op dit unit-id", c);
+        else
+            snprintf(err, errn, "Modbus-fout %d (%s)", c, c >= 1 && c <= 4 ? ex[c] : "onbekend");
+        return 0;
+    }
+    if (in[7] != 3 || in[8] != count * 2 || n < 9 + count * 2) {
+        snprintf(err, errn, "onverwacht Modbus-antwoord");
+        return 0;
+    }
+    for (int i = 0; i < count; i++) regs[i] = (uint16_t)((in[9 + 2 * i] << 8) | in[10 + 2 * i]);
+    return 1;
+}
+
+int inv_sunspec_marker(const uint16_t * r) { return r[0] == 0x5375 && r[1] == 0x6e53; }
+
+int inv_sunspec_inverter_model(int id) {
+    return (id >= 101 && id <= 103) || (id >= 111 && id <= 113);
+}
+
+static double sf_pow(int16_t sf) {
+    double v = 1;
+    if (sf > 0) for (int i = 0; i < sf && i < 10; i++) v *= 10;
+    else for (int i = 0; i < -sf && i < 10; i++) v /= 10;
+    return v;
+}
+
+static int f32(const uint16_t * w, double * out) {
+    uint32_t u = ((uint32_t)w[0] << 16) | w[1];
+    float f;
+    memcpy(&f, &u, sizeof f);
+    if (f != f || f > 3.0e9f || f < -3.0e9f) return 0;   /* NaN = not implemented */
+    *out = f;
+    return 1;
+}
+
+int inv_sunspec_parse(int model_id, const uint16_t * m, int len, inv_reading_t * r, int * status) {
+    r->power_w = 0; r->today_wh = -1; r->total_wh = -1;
+    *status = 0;
+    if (model_id >= 101 && model_id <= 103) {
+        /* W 12, W_SF 13, WH 22-23 (acc32), WH_SF 24, St 36 */
+        if (len < 37) return 0;
+        int16_t w = (int16_t)m[12], wsf = (int16_t)m[13], whsf = (int16_t)m[24];
+        uint32_t wh = ((uint32_t)m[22] << 16) | m[23];
+        if (m[12] == 0x8000 || m[13] == 0x8000 || m[24] == 0x8000 || wh == 0) return 0;
+        r->power_w = w * sf_pow(wsf);
+        r->total_wh = wh * sf_pow(whsf);
+        *status = m[36] == 0xffff ? 0 : m[36];
+    } else if (model_id >= 111 && model_id <= 113) {
+        /* W 20-21, WH 30-31, St 46 (floats are two registers, high word first) */
+        if (len < 47) return 0;
+        double w, wh;
+        if (!f32(&m[20], &w) || !f32(&m[30], &wh) || wh <= 0) return 0;
+        r->power_w = w;
+        r->total_wh = wh;
+        *status = m[46] == 0xffff ? 0 : m[46];
+    } else {
+        return 0;
+    }
+    if (r->power_w < 0) r->power_w = 0;            /* night consumption shows as a few W below 0 */
+    if (*status == 2 || *status == 1 || *status == 8) r->power_w = 0;   /* sleeping / off / standby */
+    return 1;
+}
+
+void inv_sunspec_string(const uint16_t * regs, int nregs, char * out, size_t n) {
+    size_t o = 0;
+    for (int i = 0; i < nregs && o + 2 < n; i++) {
+        char c[2] = { (char)(regs[i] >> 8), (char)regs[i] };
+        for (int k = 0; k < 2; k++)
+            if (c[k] >= 0x20 && c[k] < 0x7f) out[o++] = c[k];
+    }
+    while (o && out[o - 1] == ' ') o--;
+    out[o] = 0;
+}

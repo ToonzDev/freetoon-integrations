@@ -129,6 +129,70 @@ static void test_soliscloud(void) {
     CHECK(!inv_parse_soliscloud("{\"success\":true,\"code\":\"0\",\"data\":{\"page\":{\"records\":[]}}}", &r, err, sizeof err));
 }
 
+/* SunSpec: synthetic register blocks laid out as in the SunSpec models
+ * (SolarEdge-style 103 with scale factors, Fronius-style 113 floats). */
+static void put_f32(uint16_t * w, float f) {
+    uint32_t u;
+    memcpy(&u, &f, sizeof u);
+    w[0] = (uint16_t)(u >> 16);
+    w[1] = (uint16_t)u;
+}
+static void test_sunspec(void) {
+    uint16_t m[60];
+    inv_reading_t r;
+    int st;
+
+    memset(m, 0, sizeof m);                       /* model 103, L = 50 */
+    m[12] = 1234; m[13] = 0;                      /* W, W_SF */
+    m[22] = (uint16_t)(15234567u >> 16); m[23] = (uint16_t)(15234567u & 0xffff); m[24] = 0;   /* WH, WH_SF */
+    m[36] = 4;                                    /* St: producing */
+    CHECK(inv_sunspec_parse(103, m, 50, &r, &st) && NEAR(r.power_w, 1234) && NEAR(r.total_wh, 15234567)
+          && r.today_wh < 0 && st == 4);
+    m[12] = 12345; m[13] = (uint16_t)-1;          /* 1234.5 W */
+    m[24] = 3; m[22] = 0; m[23] = 15234;          /* kWh counter with SF 3 */
+    CHECK(inv_sunspec_parse(103, m, 50, &r, &st) && NEAR(r.power_w, 1234.5) && NEAR(r.total_wh, 15234000));
+    m[36] = 2; m[12] = 7; m[13] = 0;              /* sleeping: a few W reported -> 0 */
+    CHECK(inv_sunspec_parse(103, m, 50, &r, &st) && NEAR(r.power_w, 0) && st == 2);
+    m[36] = 4; m[12] = (uint16_t)-5;              /* night consumption -> 0 */
+    CHECK(inv_sunspec_parse(103, m, 50, &r, &st) && NEAR(r.power_w, 0));
+    m[12] = 0x8000;                               /* W not implemented */
+    CHECK(!inv_sunspec_parse(103, m, 50, &r, &st));
+    m[12] = 100; m[22] = 0; m[23] = 0;            /* WH 0: no counter */
+    CHECK(!inv_sunspec_parse(103, m, 50, &r, &st));
+    CHECK(!inv_sunspec_parse(103, m, 20, &r, &st));   /* block too short */
+    CHECK(!inv_sunspec_parse(160, m, 50, &r, &st));   /* not an inverter model */
+
+    memset(m, 0, sizeof m);                       /* model 113, L = 60, floats */
+    put_f32(&m[20], 2500.5f);
+    put_f32(&m[30], 1.0e6f);
+    m[46] = 4;
+    CHECK(inv_sunspec_parse(113, m, 60, &r, &st) && NEAR(r.power_w, 2500.5) && NEAR(r.total_wh, 1.0e6));
+    m[20] = 0x7fc0; m[21] = 0;                    /* NaN = not implemented */
+    CHECK(!inv_sunspec_parse(113, m, 60, &r, &st));
+
+    CHECK(inv_sunspec_inverter_model(101) && inv_sunspec_inverter_model(113) && !inv_sunspec_inverter_model(1)
+          && !inv_sunspec_inverter_model(104));
+    uint16_t mk[2] = { 0x5375, 0x6e53 }, bad[2] = { 0x5375, 0 };
+    CHECK(inv_sunspec_marker(mk) && !inv_sunspec_marker(bad));
+    uint16_t sreg[8] = { ('S' << 8) | 'o', ('l' << 8) | 'a', ('r' << 8) | 'E', ('d' << 8) | 'g', ('e' << 8) | ' ', 0, 0, 0 };
+    char mfr[32];
+    inv_sunspec_string(sreg, 8, mfr, sizeof mfr);
+    CHECK(!strcmp(mfr, "SolarEdge"));
+
+    /* Modbus framing */
+    uint8_t q[12];
+    CHECK(inv_modbus_req(q, 0x0102, 1, 40069, 52) == 12);
+    CHECK(q[0] == 1 && q[1] == 2 && q[5] == 6 && q[6] == 1 && q[7] == 3 && ((q[8] << 8) | q[9]) == 40069 && q[11] == 52);
+    uint8_t a[13] = { 1, 2, 0, 0, 0, 7, 1, 3, 4, 0x53, 0x75, 0x6e, 0x53 };
+    uint16_t regs[2];
+    char err[96];
+    CHECK(inv_modbus_resp(a, 13, 0x0102, 2, regs, err, sizeof err) && regs[0] == 0x5375 && regs[1] == 0x6e53);
+    CHECK(!inv_modbus_resp(a, 13, 0x0103, 2, regs, err, sizeof err));          /* other transaction */
+    uint8_t x[9] = { 1, 2, 0, 0, 0, 3, 1, 0x83, 2 };
+    CHECK(!inv_modbus_resp(x, 9, 0x0102, 2, regs, err, sizeof err) && strstr(err, "register bestaat niet"));
+    CHECK(!inv_modbus_resp(a, 11, 0x0102, 2, regs, err, sizeof err));          /* short */
+}
+
 int main(void) {
     test_crypto();
     test_soliscloud_sign();
@@ -136,6 +200,7 @@ int main(void) {
     test_envoy();
     test_stick();
     test_soliscloud();
+    test_sunspec();
     printf("%d/%d checks passed\n", runs - fails, runs);
     return fails != 0;
 }

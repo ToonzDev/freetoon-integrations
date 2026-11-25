@@ -1,7 +1,7 @@
 {
   "id": "inverters",
   "name": "Omvormers",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "binary": "freetoon-app-inverters",
   "args": [],
   "service_id": "inverters",
@@ -25,10 +25,11 @@
           { "value": "enphase", "label": "Enphase Envoy (lokaal)" },
           { "value": "solis_local", "label": "Solis / Ginlong wifi-stick (lokaal)" },
           { "value": "soliscloud", "label": "SolisCloud (cloud, API-sleutel)" },
-          { "value": "omnik", "label": "Omnik wifi-stick (lokaal)" }
+          { "value": "omnik", "label": "Omnik wifi-stick (lokaal)" },
+          { "value": "sunspec", "label": "SunSpec via Modbus TCP (SolarEdge, SMA, Fronius, Kostal, ...)" }
       ] },
       { "key": "HOST", "label": "IP-adres", "type": "text", "placeholder": "192.168.1.60",
-        "show": "TYPE=enphase|solis_local|omnik", "guards": "ENVOY_TOKEN,STICK_PASS" },
+        "show": "TYPE=enphase|solis_local|omnik|sunspec", "guards": "ENVOY_TOKEN,STICK_PASS" },
       { "key": "ENVOY_TOKEN", "label": "Token (Envoy-firmware 7 of hoger)", "type": "secret",
         "show": "TYPE=enphase",
         "help": "Niet nodig bij oudere firmware. Haal een token op via entrez.enphaseenergy.com, of laat dit leeg en vul hieronder je Enlighten-account in: dan haalt de app zelf een token op." },
@@ -42,9 +43,13 @@
         "help": "Vraag API-toegang aan bij Solis (SolisCloud > Account > Basisinstellingen > API-beheer); je krijgt een KeyId en KeySecret." },
       { "key": "SOLIS_KEY_SECRET", "label": "KeySecret", "type": "secret", "show": "TYPE=soliscloud" },
       { "key": "SOLIS_API", "label": "API-adres", "type": "text", "default": "https://www.soliscloud.com:13333",
-        "show": "TYPE=soliscloud" }
+        "show": "TYPE=soliscloud" },
+      { "key": "MB_PORT", "label": "Modbus-poort", "type": "text", "default": "502", "show": "TYPE=sunspec",
+        "help": "Zet Modbus TCP aan op de omvormer. Meestal: SolarEdge 1502 (aanzetten via SetApp of het display; betrouwbaar via een netwerkkabel, via wifi alleen op sommige firmware), SMA 502, Fronius 502 (Modbus TCP op 'int + SF' of 'float'), Kostal 1502." },
+      { "key": "MB_UNIT", "label": "Modbus unit-id", "type": "text", "default": "1", "show": "TYPE=sunspec",
+        "help": "Meestal 1 (SolarEdge, Fronius); SMA 126, Kostal 71." }
     ]
   },
-  "description": "Leest je omvormer uit (Enphase, Solis, Omnik) voor de Zon-tegel, het dimscherm en de statistieken.",
+  "description": "Leest je omvormer uit (Enphase, Solis, Omnik, of SunSpec via Modbus TCP: SolarEdge, SMA, Fronius, Kostal) voor de Zon-tegel, het dimscherm en de statistieken.",
   "license": "MIT"
 }

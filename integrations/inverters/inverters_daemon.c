@@ -14,7 +14,8 @@
  * gets its arguments from a 0600 config file that is removed right after.
  *
  * Driver logic ported from oepi-loepi's solarpanel-plugins (ENPHASE1,
- * ENPHASE-T1, OMNIK2, SOLISCLOUD1); the WiFi-stick status.html reader is new.
+ * ENPHASE-T1, OMNIK2, SOLISCLOUD1); the WiFi-stick status.html reader and the
+ * SunSpec reader (Modbus TCP: SolarEdge, SMA, Fronius, Kostal, ...) are new.
  *
  * Env (tests): INV_DIR = settings dir, INV_CORE = core host:port.
  */
@@ -23,6 +24,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -49,7 +51,7 @@ static int  g_core_port = 10081;
 
 /* ------------------------------------------------------------ config */
 typedef struct {
-    char type[24];            /* enphase | solis_local | soliscloud | omnik */
+    char type[24];            /* enphase | solis_local | soliscloud | omnik | sunspec */
     char host[128];           /* inverter / logger / Envoy address */
     char envoy_token[2048];   /* firmware 7+: owner token (optional with Enlighten login) */
     char enl_user[128];
@@ -59,6 +61,8 @@ typedef struct {
     char solis_key_id[96];
     char solis_key_secret[96];
     char solis_api[128];
+    char mb_port[8];          /* sunspec: Modbus TCP port */
+    char mb_unit[8];          /* sunspec: Modbus unit id */
     int  interval;            /* s */
 } conf_t;
 
@@ -88,7 +92,7 @@ static void set_field(conf_t * c, const char * k, const char * v) {
     S("ENLIGHTEN_USER", enl_user) S("ENLIGHTEN_PASS", enl_pass)
     S("STICK_USER", stick_user) S("STICK_PASS", stick_pass)
     S("SOLIS_KEY_ID", solis_key_id) S("SOLIS_KEY_SECRET", solis_key_secret)
-    S("SOLIS_API", solis_api)
+    S("SOLIS_API", solis_api) S("MB_PORT", mb_port) S("MB_UNIT", mb_unit)
 #undef S
     if (!strcmp(k, "INTERVAL")) c->interval = atoi(v);
 }
@@ -106,6 +110,8 @@ static int conf_load(void) {
     snprintf(c.stick_user, sizeof c.stick_user, "admin");
     snprintf(c.stick_pass, sizeof c.stick_pass, "admin");
     snprintf(c.solis_api, sizeof c.solis_api, "https://www.soliscloud.com:13333");
+    snprintf(c.mb_port, sizeof c.mb_port, "502");
+    snprintf(c.mb_unit, sizeof c.mb_unit, "1");
     c.interval = 30;
     FILE * f = fopen(path, "r");
     if (f) {
@@ -307,13 +313,28 @@ static void fmt_kwh(double wh, char * out, size_t n) {
     snprintf(out, n, "%ld,%ld kWh", d / 10, d % 10);
 }
 
+static char g_ss_mfr[40];          /* SunSpec manufacturer (common model), once read */
+
+/* Brand for the core's source line: the type, or for SunSpec the
+ * manufacturer the inverter reports (letters, digits, space, - . only). */
+static const char * brand_name(void) {
+    static char b[40];
+    if (strcmp(g_conf.type, "sunspec") || !g_ss_mfr[0]) return g_conf.type;
+    size_t o = 0;
+    for (const char * p = g_ss_mfr; *p && o + 1 < sizeof b; p++)
+        if ((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || strchr(" -.", *p))
+            b[o++] = *p;
+    b[o] = 0;
+    return o ? b : g_conf.type;
+}
+
 static void report(int ok, const inv_reading_t * r, const char * msg) {
     char m[200], body[512];
     json_esc(msg ? msg : "", m, sizeof m);
     snprintf(body, sizeof body,
         "{\"app\":\"" APP_ID "\",\"brand\":\"%s\",\"ok\":%d,\"power_w\":%.0f,"
         "\"today_wh\":%.0f,\"total_wh\":%.0f,\"msg\":\"%s\"}",
-        g_conf.type, ok, ok ? r->power_w : 0.0, ok ? r->today_wh : -1.0, ok ? r->total_wh : -1.0, m);
+        brand_name(), ok, ok ? r->power_w : 0.0, ok ? r->today_wh : -1.0, ok ? r->total_wh : -1.0, m);
     int st = core_post("/api/v1/solar/source", body);
     /* A core before 1.0.18 has no solar source endpoint (404, or 401 when its
      * web login is on, as the path is not public there): the readings go
@@ -591,6 +612,131 @@ static int poll_soliscloud(inv_reading_t * rd, char * msg, size_t msgn) {
     return ok;
 }
 
+/* ------------------------------------------------ SunSpec / Modbus TCP */
+/* Generic SunSpec reader: find the "SunS" marker (40000, 50000 or 0), walk
+ * the model chain to the inverter model (101-103 integer + scale factor,
+ * 111-113 float) and read power and lifetime energy from it. A fresh
+ * connection per poll, closed right after: SolarEdge serves one Modbus
+ * client at a time, and others (a home automation) get their turn. */
+static int      g_ss_model = -1;       /* register of the inverter model's ID word */
+static int      g_ss_mid, g_ss_len;
+static uint16_t g_ss_tid;
+
+static int recv_all(int s, uint8_t * b, int n) {
+    int got = 0;
+    while (got < n) {
+        ssize_t r = recv(s, b + got, (size_t)(n - got), 0);
+        if (r <= 0) return -1;
+        got += (int)r;
+    }
+    return got;
+}
+
+static int mb_port(void) {
+    int p = atoi(g_conf.mb_port);
+    return p > 0 && p < 65536 ? p : 502;
+}
+
+static int mb_connect(char * msg, size_t n) {
+    char port[8], host[128];
+    snprintf(port, sizeof port, "%d", mb_port());
+    snprintf(host, sizeof host, "%s", g_conf.host);
+    if (host[0] == '[') {                       /* [v6] */
+        memmove(host, host + 1, strlen(host));
+        char * e = strchr(host, ']');
+        if (e) *e = 0;
+    }
+    struct addrinfo hints, * res = NULL;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(host, port, &hints, &res) != 0 || !res) {
+        snprintf(msg, n, "adres '%s' onbekend", g_conf.host);
+        return -1;
+    }
+    int s = socket(res->ai_family, SOCK_STREAM, 0);
+    if (s < 0) { freeaddrinfo(res); snprintf(msg, n, "geen socket"); return -1; }
+    struct timeval tv = { 5, 0 };
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    if (connect(s, res->ai_addr, res->ai_addrlen) != 0) {
+        int e = errno;
+        if (e == ECONNREFUSED)
+            snprintf(msg, n, "verbinding geweigerd op poort %d: staat Modbus TCP aan, en is dit de juiste poort?", mb_port());
+        else
+            snprintf(msg, n, "geen verbinding met %s:%d (%s)", g_conf.host, mb_port(),
+                     e == EAGAIN || e == EINPROGRESS || e == ETIMEDOUT ? "time-out" : strerror(e));
+        close(s);
+        freeaddrinfo(res);
+        return -1;
+    }
+    freeaddrinfo(res);
+    return s;
+}
+
+static int mb_read(int s, uint16_t addr, uint16_t count, uint16_t * regs, char * msg, size_t n) {
+    uint8_t req[12], resp[300];
+    int unit = g_conf.mb_unit[0] ? atoi(g_conf.mb_unit) : 1;
+    if (unit < 0 || unit > 255) unit = 1;
+    uint16_t tid = ++g_ss_tid;
+    inv_modbus_req(req, tid, (uint8_t)unit, addr, count);
+    if (send(s, req, sizeof req, 0) != (ssize_t)sizeof req) { snprintf(msg, n, "Modbus: versturen mislukt"); return 0; }
+    if (recv_all(s, resp, 7) < 0) { snprintf(msg, n, "Modbus: geen antwoord (unit-id %d?)", unit); return 0; }
+    int len = (resp[4] << 8) | resp[5];
+    if (len < 2 || 6 + len > (int)sizeof resp) { snprintf(msg, n, "Modbus: ongeldig antwoord"); return 0; }
+    if (recv_all(s, resp + 7, len - 1) < 0) { snprintf(msg, n, "Modbus: antwoord afgebroken"); return 0; }
+    return inv_modbus_resp(resp, 6 + len, tid, count, regs, msg, n);
+}
+
+static int ss_discover(int s, char * msg, size_t n) {
+    static const uint16_t bases[] = { 40000, 50000, 0 };
+    char e[160] = "";
+    for (size_t b = 0; b < sizeof bases / sizeof bases[0]; b++) {
+        uint16_t r[16];
+        if (!mb_read(s, bases[b], 2, r, e, sizeof e) || !inv_sunspec_marker(r)) continue;
+        int addr = bases[b] + 2;
+        for (int step = 0; step < 40 && addr < 65000; step++) {
+            if (!mb_read(s, (uint16_t)addr, 2, r, e, sizeof e)) break;
+            int id = r[0], len = r[1];
+            if (id == 0xffff || len == 0) break;
+            if (id == 1 && len >= 16 && mb_read(s, (uint16_t)(addr + 2), 16, r, e, sizeof e))
+                inv_sunspec_string(r, 16, g_ss_mfr, sizeof g_ss_mfr);
+            if (inv_sunspec_inverter_model(id)) {
+                g_ss_model = addr;
+                g_ss_mid = id;
+                g_ss_len = len > 120 ? 120 : len;
+                logf_("SunSpec: %s, inverter model %d at register %d (%d registers)",
+                      g_ss_mfr[0] ? g_ss_mfr : "?", id, addr, len);
+                return 1;
+            }
+            addr += 2 + len;
+        }
+        snprintf(msg, n, "SunSpec gevonden (register %u), maar geen omvormermodel 101-103/111-113", bases[b]);
+        return 0;
+    }
+    if (e[0]) snprintf(msg, n, "geen SunSpec-gegevens (%s)", e);
+    else snprintf(msg, n, "geen SunSpec-gegevens op register 40000, 50000 of 0");
+    return 0;
+}
+
+static int poll_sunspec(inv_reading_t * rd, char * msg, size_t msgn) {
+    int s = mb_connect(msg, msgn);
+    if (s < 0) return 0;
+    int ok = 0;
+    if (g_ss_model >= 0 || ss_discover(s, msg, msgn)) {
+        uint16_t m[120];
+        if (mb_read(s, (uint16_t)(g_ss_model + 2), (uint16_t)g_ss_len, m, msg, msgn)) {
+            int st = 0;
+            ok = inv_sunspec_parse(g_ss_mid, m, g_ss_len, rd, &st);
+            if (!ok) snprintf(msg, msgn, "omvormer geeft (nog) geen vermogen of opbrengst (status %d)", st);
+        } else {
+            g_ss_model = -1;                  /* find the layout again next time */
+        }
+    }
+    close(s);
+    return ok;
+}
+
 /* --------------------------------------------------------------- main */
 static volatile sig_atomic_t g_stop;
 static void on_sig(int s) { (void)s; g_stop = 1; }
@@ -621,6 +767,8 @@ int main(int argc, char ** argv) {
             g_envoy_mode = 0;
             g_envoy_tok[0] = 0;
             g_envoy_tok_try = 0;
+            g_ss_model = -1;
+            g_ss_mfr[0] = 0;
             last_ok = -1;
             zero_polls = 0;
         }
@@ -628,12 +776,13 @@ int main(int argc, char ** argv) {
         char msg[200] = "";
         int ok = 0, cloud = 0;
         const char * t = g_conf.type;
-        int local = !strcmp(t, "enphase") || !strcmp(t, "solis_local") || !strcmp(t, "omnik");
+        int local = !strcmp(t, "enphase") || !strcmp(t, "solis_local") || !strcmp(t, "omnik") || !strcmp(t, "sunspec");
         if (!t[0]) snprintf(msg, sizeof msg, "geen omvormer ingesteld");
         else if (local && !host_ok(g_conf.host)) snprintf(msg, sizeof msg, "vul het IP-adres in");
         else if (!strcmp(t, "enphase"))     ok = poll_enphase(&rd, msg, sizeof msg);
         else if (!strcmp(t, "solis_local")) ok = poll_stick(0, &rd, msg, sizeof msg);
         else if (!strcmp(t, "omnik"))       ok = poll_stick(1, &rd, msg, sizeof msg);
+        else if (!strcmp(t, "sunspec"))     ok = poll_sunspec(&rd, msg, sizeof msg);
         else if (!strcmp(t, "soliscloud")) { cloud = 1; ok = poll_soliscloud(&rd, msg, sizeof msg); }
         else snprintf(msg, sizeof msg, "onbekend type '%s'", t);
 

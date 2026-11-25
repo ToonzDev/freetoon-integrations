@@ -38,4 +38,29 @@ void inv_soliscloud_sign(const char * key_id, const char * key_secret, const cha
                          const char * date, const char * path,
                          char * content_md5, size_t md5n, char * auth, size_t authn);
 
+/* ---- SunSpec over Modbus TCP (SolarEdge, SMA, Fronius, Kostal, ...) ----
+ * Registers are 16-bit words as read (host order). */
+#include <stdint.h>
+
+/* Modbus TCP "read holding registers" (function 3) request: 12 bytes. */
+int inv_modbus_req(uint8_t * out, uint16_t tid, uint8_t unit, uint16_t addr, uint16_t count);
+/* Parse the answer to that request into regs[count]. 1 = ok; 0 with a reason
+ * in err (Modbus exception, wrong transaction, short frame). */
+int inv_modbus_resp(const uint8_t * in, int n, uint16_t tid, uint16_t count,
+                    uint16_t * regs, char * err, size_t errn);
+
+/* "SunS" marker (0x5375 0x6e53) in two registers. */
+int inv_sunspec_marker(const uint16_t * r);
+/* Inverter models: 101-103 (integer + scale factors), 111-113 (float). */
+int inv_sunspec_inverter_model(int id);
+/* Readings from an inverter model block (the registers after its ID and L
+ * words, `len` of them). Power from W, lifetime from WH; today is not in
+ * SunSpec (-1). *status = SunSpec St (1 off, 2 sleeping, 3 starting,
+ * 4 producing, 5 throttled, 6 shutting down, 7 fault, 8 standby; 0 unknown).
+ * Returns 0 when W or WH is "not implemented" / invalid. */
+int inv_sunspec_parse(int model_id, const uint16_t * m, int len, inv_reading_t * r, int * status);
+/* ASCII string packed two characters per register (e.g. the common model's
+ * manufacturer), NULs and trailing spaces dropped. */
+void inv_sunspec_string(const uint16_t * regs, int nregs, char * out, size_t n);
+
 #endif
