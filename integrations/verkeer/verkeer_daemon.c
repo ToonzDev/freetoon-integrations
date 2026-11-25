@@ -488,7 +488,7 @@ static void write_out(time_t now, const char * err) {
         if (longest) snprintf(sub, sizeof sub, "%.0f km, langste %s %.0f km", km, longest->road, longest->km);
         else snprintf(sub, sizeof sub, "%s", "Geen files in Nederland");
     }
-    post_tile(value, sub, (g_nroads && mf) ? "file" : "");
+    post_tile(value, sub, "");       /* no inbox messages: the core turns any alert into one */
 
     snprintf(path, sizeof path, "%s/state.json", g_dir);
     snprintf(tmp, sizeof tmp, "%s.tmp", path);

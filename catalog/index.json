@@ -81,7 +81,7 @@
     {
       "id": "verkeer",
       "name": "Verkeer",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "Actuele files en afsluitingen in Nederland (NDW open data), met je eigen wegen bovenaan.",
       "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/verkeer.tgz"
     }
