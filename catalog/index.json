@@ -77,7 +77,13 @@
       "description": "Zonnepanelen via de omvormer: Enphase Envoy, Solis (SolisCloud) en Omnik. Instellen op de webpagina :10081/solar.",
       "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/inverters.tgz",
       "min_toonui": "1.0.18"
+    },
+    {
+      "id": "verkeer",
+      "name": "Verkeer",
+      "version": "0.1.0",
+      "description": "Actuele files en afsluitingen in Nederland (NDW open data), met je eigen wegen bovenaan.",
+      "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/verkeer.tgz"
     }
   ]
 }
-

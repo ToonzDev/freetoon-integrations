@@ -1,0 +1,24 @@
+{
+  "id": "verkeer",
+  "name": "Verkeer",
+  "version": "0.1.0",
+  "binary": "freetoon-app-verkeer",
+  "args": [],
+  "service_id": "verkeer",
+  "tile": {
+    "title": "Verkeer",
+    "color": "0xf59e0b",
+    "icon": "car",
+    "value_field": "value",
+    "value_unit": "",
+    "subtitle_field": "subtitle",
+    "subtitle_unit": ""
+  },
+  "detail_screen": {
+    "type": "plugin",
+    "library": "verkeer_ui.so",
+    "entry": "screen_create"
+  },
+  "description": "Actuele files en afsluitingen in Nederland (NDW open data), met je eigen wegen bovenaan.",
+  "license": "MIT"
+}
