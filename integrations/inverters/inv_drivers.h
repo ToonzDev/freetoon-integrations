@@ -22,7 +22,7 @@ int inv_parse_envoy_v1(const char * body, inv_reading_t * r);
  * stops updating. readingTime is the Envoy's epoch of each. 1 = parsed. */
 typedef struct {
     int    have_eim;  double eim_w;  long eim_time;
-    int    have_inv;  double inv_w;  long inv_time;
+    int    have_inv;  double inv_w;  long inv_time;  double inv_wh;   /* whLifetime of the reports */
 } inv_envoy_prod_t;
 int inv_parse_envoy_production(const char * body, inv_envoy_prod_t * p);
 /* <sn>...</sn> from the Envoy's /info.xml. 1 = found. */

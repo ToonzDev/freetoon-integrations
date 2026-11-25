@@ -91,7 +91,7 @@ static void test_envoy(void) {
           "\"wNow\":1532.7,\"whLifetime\":4150000.2}],\"consumption\":[{\"type\":\"eim\",\"activeCount\":1,"
           "\"measurementType\":\"total-consumption\",\"wNow\":900}]}", &pj));
     CHECK(pj.have_eim && NEAR(pj.eim_w, 1532.7) && pj.eim_time == 1795603600 && pj.have_inv && NEAR(pj.inv_w, 386)
-          && pj.inv_time == 1795600000);
+          && pj.inv_time == 1795600000 && NEAR(pj.inv_wh, 4111344));
     CHECK(inv_parse_envoy_production("{\"production\":[{\"type\":\"inverters\",\"activeCount\":10,\"readingTime\":5,"
           "\"wNow\":420},{\"type\":\"eim\",\"activeCount\":0,\"measurementType\":\"production\",\"wNow\":0}]}", &pj)
           && !pj.have_eim && pj.have_inv && NEAR(pj.inv_w, 420));

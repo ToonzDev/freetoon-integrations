@@ -547,16 +547,48 @@ static int poll_enphase_v1(inv_reading_t * rd, char * msg, size_t msgn) {
     return 0;
 }
 
-/* Live power for metered Envoys: /production.json's production CT ("eim").
- * /api/v1/production's wattsNow comes from the microinverters' reports,
- * which some firmware (D7/D8, Envoy-S Metered) stops updating (user report:
- * stuck at 386 W). Power only: the lifetime stays the one from
- * /api/v1/production, so the statistics never switch counters. Without a
- * CT nothing changes; a production.json that is missing is tried again
- * every 30 min. */
+/* /production.json next to /api/v1/production. User report (firmware D8,
+ * Envoy-S Metered): /api/v1/production froze completely (386 W, lifetime
+ * 7969 kWh, today 0) while /production.json kept updating (inverters
+ * 889 W / 8104 kWh, production CT 856 W). So when production.json answers:
+ *   power    = the production CT ("eim", live) when installed, else the
+ *              microinverter reports' wNow from production.json;
+ *   lifetime = the reports' whLifetime from production.json (the same kind
+ *              of counter as v1's; the core's accumulator re-bases on the
+ *              jump from a frozen v1 value instead of counting it);
+ *   today    = counted here from that lifetime (v1's froze at 0), from the
+ *              first reading of the day (today.state survives restarts).
+ * A production.json that is missing is tried again every 30 min. */
 static int    g_pj_state = -1;          /* -1 unknown, 0 none / no CT, 1 CT power used */
 static time_t g_pj_next;
 static long   g_inv_age_logged = -1;
+
+/* Today from a lifetime counter: start of the day kept in today.state. */
+static int    g_day_ymd;
+static double g_day_start_wh = -1;
+
+static double today_from_lifetime(double wh) {
+    time_t now = time(NULL);
+    struct tm tm;
+    localtime_r(&now, &tm);
+    int ymd = (tm.tm_year + 1900) * 10000 + (tm.tm_mon + 1) * 100 + tm.tm_mday;
+    char path[300];
+    path_in_dir(path, sizeof path, "today.state");
+    if (g_day_start_wh < 0) {                   /* first call: state from before a restart */
+        FILE * f = fopen(path, "r");
+        if (f) {
+            if (fscanf(f, "%d %lf", &g_day_ymd, &g_day_start_wh) != 2) g_day_start_wh = -1;
+            fclose(f);
+        }
+    }
+    if (g_day_start_wh < 0 || g_day_ymd != ymd || wh < g_day_start_wh) {
+        g_day_ymd = ymd;
+        g_day_start_wh = wh;
+        FILE * f = fopen(path, "w");
+        if (f) { fprintf(f, "%d %.0f\n", ymd, wh); fclose(f); }
+    }
+    return wh - g_day_start_wh;
+}
 
 static void enphase_live_power(inv_reading_t * rd) {
     time_t now = time(NULL);
@@ -572,26 +604,34 @@ static void enphase_live_power(inv_reading_t * rd) {
     int ok = r.code == 200 && inv_parse_envoy_production(r.body, &pj);
     int code = r.code;
     resp_free(&r);
-    if (!ok || !pj.have_eim) {
+    if (!ok) {
         if (g_pj_state != 0)
-            logf_("Enphase: %s, power from the microinverter reports (/api/v1/production)",
-                  !ok ? (code ? "no /production.json" : "/production.json not reachable") : "no production CT");
+            logf_("Enphase: %s, readings from /api/v1/production",
+                  code ? "no /production.json" : "/production.json not reachable");
         g_pj_state = 0;
         g_pj_next = now + 1800;
-        if (ok && pj.have_inv && pj.inv_time > 0) {          /* say so when the reports go stale */
-            long age = (long)(now - pj.inv_time) / 60;
-            if (age >= 30 && (g_inv_age_logged < 0 || age >= g_inv_age_logged + 60)) {
-                logf_("Enphase: last microinverter report is %ld min old (Envoy clock), %.0f W", age, pj.inv_w);
-                g_inv_age_logged = age;
-            }
-        }
         return;
     }
+    if (pj.have_inv && pj.inv_time > 0) {          /* say so when the reports go stale */
+        long age = (long)(now - pj.inv_time) / 60;
+        if (age >= 30 && (g_inv_age_logged < 0 || age >= g_inv_age_logged + 60)) {
+            logf_("Enphase: last microinverter report is %ld min old (Envoy clock), %.0f W", age, pj.inv_w);
+            g_inv_age_logged = age;
+        }
+    }
+    double v1_w = rd->power_w, v1_wh = rd->total_wh;
+    if (pj.have_eim)      rd->power_w = pj.eim_w;
+    else if (pj.have_inv) rd->power_w = pj.inv_w;
+    if (rd->power_w < 0) rd->power_w = 0;
+    if (pj.have_inv && pj.inv_wh > 0) {
+        rd->total_wh = pj.inv_wh;
+        rd->today_wh = today_from_lifetime(pj.inv_wh);
+    }
     if (g_pj_state != 1)
-        logf_("Enphase: production CT found, live power from /production.json (reports said %.0f W, CT %.0f W)",
-              rd->power_w, pj.eim_w);
+        logf_("Enphase: readings from /production.json: power %.0f W (%s), lifetime %.0f Wh "
+              "(/api/v1/production said %.0f W, %.0f Wh)", rd->power_w,
+              pj.have_eim ? "production CT" : "microinverter reports", rd->total_wh, v1_w, v1_wh);
     g_pj_state = 1;
-    rd->power_w = pj.eim_w < 0 ? 0 : pj.eim_w;
 }
 
 static int poll_enphase(inv_reading_t * rd, char * msg, size_t msgn) {

@@ -42,7 +42,9 @@ int inv_parse_envoy_production(const char * body, inv_envoy_prod_t * p) {
             if (strcmp(mt, "production") || ac < 1) continue;   /* CT not installed / consumption */
             p->have_eim = 1; p->eim_w = w; p->eim_time = (long)t;
         } else if (!strcmp(type, "inverters")) {
-            p->have_inv = 1; p->inv_w = w; p->inv_time = (long)t;
+            double wh = 0;
+            mj_num(e, "whLifetime", &wh);
+            p->have_inv = 1; p->inv_w = w; p->inv_time = (long)t; p->inv_wh = wh;
         }
     }
     return p->have_eim || p->have_inv;
