@@ -24,6 +24,30 @@ int inv_parse_envoy_v1(const char * body, inv_reading_t * r) {
     return 1;
 }
 
+int inv_parse_envoy_production(const char * body, inv_envoy_prod_t * p) {
+    memset(p, 0, sizeof *p);
+    if (!body || !mj_find(body, "production", NULL)) return 0;
+    for (int i = 0; i < 8; i++) {
+        char path[48], type[24] = "", mt[24] = "";
+        snprintf(path, sizeof path, "production[%d]", i);
+        const char * e = mj_find(body, path, NULL);
+        if (!e) break;
+        double w, t = 0, ac = 0;
+        mj_str(e, "type", type, sizeof type);
+        if (!mj_num(e, "wNow", &w)) continue;
+        mj_num(e, "readingTime", &t);
+        if (!strcmp(type, "eim")) {
+            mj_str(e, "measurementType", mt, sizeof mt);
+            mj_num(e, "activeCount", &ac);
+            if (strcmp(mt, "production") || ac < 1) continue;   /* CT not installed / consumption */
+            p->have_eim = 1; p->eim_w = w; p->eim_time = (long)t;
+        } else if (!strcmp(type, "inverters")) {
+            p->have_inv = 1; p->inv_w = w; p->inv_time = (long)t;
+        }
+    }
+    return p->have_eim || p->have_inv;
+}
+
 int inv_parse_envoy_serial(const char * body, char * out, size_t n) {
     const char * p = body ? strstr(body, "<sn>") : NULL;
     if (!p) return 0;

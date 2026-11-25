@@ -1,7 +1,7 @@
 {
   "id": "inverters",
   "name": "Omvormers",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "binary": "freetoon-app-inverters",
   "args": [],
   "service_id": "inverters",

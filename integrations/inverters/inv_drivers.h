@@ -16,6 +16,15 @@ typedef struct {
 /* Enphase Envoy /api/v1/production:
  * {"wattHoursToday":..,"wattHoursSevenDays":..,"wattHoursLifetime":..,"wattsNow":..} */
 int inv_parse_envoy_v1(const char * body, inv_reading_t * r);
+/* Envoy /production.json: the production CT ("eim", measurementType
+ * production, activeCount > 0) is measured live; the "inverters" entry is
+ * the microinverters' reports, which some firmware (D7/D8, metered Envoys)
+ * stops updating. readingTime is the Envoy's epoch of each. 1 = parsed. */
+typedef struct {
+    int    have_eim;  double eim_w;  long eim_time;
+    int    have_inv;  double inv_w;  long inv_time;
+} inv_envoy_prod_t;
+int inv_parse_envoy_production(const char * body, inv_envoy_prod_t * p);
 /* <sn>...</sn> from the Envoy's /info.xml. 1 = found. */
 int inv_parse_envoy_serial(const char * body, char * out, size_t n);
 

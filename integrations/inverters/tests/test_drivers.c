@@ -83,6 +83,19 @@ static void test_envoy(void) {
     CHECK(NEAR(r.power_w, 1024) && NEAR(r.today_wh, 21674) && NEAR(r.total_wh, 4111344));
     CHECK(inv_parse_envoy_v1("{\"wattsNow\":-3}", &r) && NEAR(r.power_w, 0) && r.today_wh < 0);
     CHECK(!inv_parse_envoy_v1("<html>401</html>", &r));
+    /* /production.json: metered Envoy (production CT) and one without CTs */
+    inv_envoy_prod_t pj;
+    CHECK(inv_parse_envoy_production("{\"production\":[{\"type\":\"inverters\",\"activeCount\":14,"
+          "\"readingTime\":1795600000,\"wNow\":386,\"whLifetime\":4111344},"
+          "{\"type\":\"eim\",\"activeCount\":1,\"measurementType\":\"production\",\"readingTime\":1795603600,"
+          "\"wNow\":1532.7,\"whLifetime\":4150000.2}],\"consumption\":[{\"type\":\"eim\",\"activeCount\":1,"
+          "\"measurementType\":\"total-consumption\",\"wNow\":900}]}", &pj));
+    CHECK(pj.have_eim && NEAR(pj.eim_w, 1532.7) && pj.eim_time == 1795603600 && pj.have_inv && NEAR(pj.inv_w, 386)
+          && pj.inv_time == 1795600000);
+    CHECK(inv_parse_envoy_production("{\"production\":[{\"type\":\"inverters\",\"activeCount\":10,\"readingTime\":5,"
+          "\"wNow\":420},{\"type\":\"eim\",\"activeCount\":0,\"measurementType\":\"production\",\"wNow\":0}]}", &pj)
+          && !pj.have_eim && pj.have_inv && NEAR(pj.inv_w, 420));
+    CHECK(!inv_parse_envoy_production("<html>404</html>", &pj));
     char sn[32];
     CHECK(inv_parse_envoy_serial("<envoy_info><device><sn>122100000001</sn><pn>800-00654-r08</pn>", sn, sizeof sn)
           && !strcmp(sn, "122100000001"));

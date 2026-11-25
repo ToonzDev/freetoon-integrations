@@ -472,7 +472,7 @@ static int envoy_fetch_token(char * msg, size_t msgn) {
     return ok;
 }
 
-static int poll_enphase(inv_reading_t * rd, char * msg, size_t msgn) {
+static int poll_enphase_v1(inv_reading_t * rd, char * msg, size_t msgn) {
     char url[256];
     resp_t r;
     char http_why[64] = "";        /* plain HTTP gave no answer at all: why */
@@ -545,6 +545,59 @@ static int poll_enphase(inv_reading_t * rd, char * msg, size_t msgn) {
         g_envoy_mode = 0;          /* retry plain HTTP next time */
     } else snprintf(msg, msgn, "onverwacht antwoord van de Envoy (HTTP %d)", code);
     return 0;
+}
+
+/* Live power for metered Envoys: /production.json's production CT ("eim").
+ * /api/v1/production's wattsNow comes from the microinverters' reports,
+ * which some firmware (D7/D8, Envoy-S Metered) stops updating (user report:
+ * stuck at 386 W). Power only: the lifetime stays the one from
+ * /api/v1/production, so the statistics never switch counters. Without a
+ * CT nothing changes; a production.json that is missing is tried again
+ * every 30 min. */
+static int    g_pj_state = -1;          /* -1 unknown, 0 none / no CT, 1 CT power used */
+static time_t g_pj_next;
+static long   g_inv_age_logged = -1;
+
+static void enphase_live_power(inv_reading_t * rd) {
+    time_t now = time(NULL);
+    if (g_pj_state == 0 && now < g_pj_next) return;
+    char url[256], auth[2100];
+    resp_t r;
+    const char * hdr[] = { auth, "Accept: application/json", NULL };
+    int https = g_envoy_mode == 2;
+    snprintf(url, sizeof url, "%s://%s/production.json?details=1", https ? "https" : "http", g_conf.host);
+    if (https) snprintf(auth, sizeof auth, "Authorization: Bearer %s", g_envoy_tok);
+    if (http_req(url, https ? hdr : NULL, NULL, NULL, https, 15, &r) != 0) return;
+    inv_envoy_prod_t pj;
+    int ok = r.code == 200 && inv_parse_envoy_production(r.body, &pj);
+    int code = r.code;
+    resp_free(&r);
+    if (!ok || !pj.have_eim) {
+        if (g_pj_state != 0)
+            logf_("Enphase: %s, power from the microinverter reports (/api/v1/production)",
+                  !ok ? (code ? "no /production.json" : "/production.json not reachable") : "no production CT");
+        g_pj_state = 0;
+        g_pj_next = now + 1800;
+        if (ok && pj.have_inv && pj.inv_time > 0) {          /* say so when the reports go stale */
+            long age = (long)(now - pj.inv_time) / 60;
+            if (age >= 30 && (g_inv_age_logged < 0 || age >= g_inv_age_logged + 60)) {
+                logf_("Enphase: last microinverter report is %ld min old (Envoy clock), %.0f W", age, pj.inv_w);
+                g_inv_age_logged = age;
+            }
+        }
+        return;
+    }
+    if (g_pj_state != 1)
+        logf_("Enphase: production CT found, live power from /production.json (reports said %.0f W, CT %.0f W)",
+              rd->power_w, pj.eim_w);
+    g_pj_state = 1;
+    rd->power_w = pj.eim_w < 0 ? 0 : pj.eim_w;
+}
+
+static int poll_enphase(inv_reading_t * rd, char * msg, size_t msgn) {
+    if (!poll_enphase_v1(rd, msg, msgn)) return 0;
+    enphase_live_power(rd);
+    return 1;
 }
 
 /* --------------------------------------------- WiFi stick (Solis / Omnik) */
@@ -801,6 +854,8 @@ int main(int argc, char ** argv) {
             g_ss_model = -1;
             g_ss_mfr[0] = 0;
             g_mb_logged = 0;
+            g_pj_state = -1;
+            g_inv_age_logged = -1;
             last_ok = -1;
             zero_polls = 0;
         }
