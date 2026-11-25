@@ -348,6 +348,22 @@ static void report(int ok, const inv_reading_t * r, const char * msg) {
         logf_("FreeToon core has no /api/v1/solar/source (HTTP %d): needs %s or newer", st, MIN_CORE);
     old_core_logged = old_core;
 
+    /* The last good reading: most inverters (and their Wi-Fi sticks) switch
+     * off when the panels stop producing, so "no connection" in the evening
+     * is normal. Then the tile says the inverter sleeps, with today's yield. */
+    static time_t g_good_t;
+    static double g_good_w, g_good_today = -1;
+    static int    g_good_yday = -1;
+    time_t now = time(NULL);
+    struct tm lt;
+    localtime_r(&now, &lt);
+    if (ok) {
+        g_good_t = now;
+        g_good_w = r->power_w;
+        g_good_today = r->today_wh;
+        g_good_yday = lt.tm_yday;
+    }
+
     char val[32], sub[80], tile[220];
     if (old_core) {
         snprintf(val, sizeof val, "-");
@@ -359,9 +375,37 @@ static void report(int ok, const inv_reading_t * r, const char * msg) {
             fmt_kwh(r->today_wh, k, sizeof k);
             snprintf(sub, sizeof sub, "Vandaag %s", k);
         } else sub[0] = 0;
-    } else {
+    } else if (!g_conf.type[0]) {
         snprintf(val, sizeof val, "-");
-        snprintf(sub, sizeof sub, "%s", g_conf.type[0] ? "Geen verbinding" : "Niet ingesteld");
+        snprintf(sub, sizeof sub, "Niet ingesteld");
+    } else if (g_good_t && now - g_good_t < 20 * 3600 &&
+               (g_good_w < 150 || lt.tm_hour >= 17 || lt.tm_hour < 8)) {
+        snprintf(val, sizeof val, "0 W");
+        if (g_good_yday == lt.tm_yday && g_good_today >= 0) {
+            char k[48];
+            fmt_kwh(g_good_today, k, sizeof k);
+            snprintf(sub, sizeof sub, "Slaapt, vandaag %s", k);
+        } else {
+            snprintf(sub, sizeof sub, "Slaapt (geen zon)");
+        }
+    } else {
+        /* the reason in short: the part in brackets ("time-out", "TLS-fout",
+         * ...) when there is one, else the message itself */
+        char why[64];
+        const char * m0 = msg ? msg : "";
+        const char * o = strrchr(m0, '(');
+        if (o && strchr(o, ')')) {
+            size_t l = (size_t)(strchr(o, ')') - o - 1);
+            if (l >= sizeof why) l = sizeof why - 1;
+            memcpy(why, o + 1, l);
+            why[l] = 0;
+        } else {
+            snprintf(why, sizeof why, "%.63s", m0[0] ? m0 : "geen verbinding");
+        }
+        if (why[0] >= 'a' && why[0] <= 'z') why[0] = (char)(why[0] - 'a' + 'A');
+        if (strlen(why) > 30) { why[27] = '.'; why[28] = '.'; why[29] = '.'; why[30] = 0; }
+        snprintf(val, sizeof val, "-");
+        snprintf(sub, sizeof sub, "%s", why);
     }
     snprintf(tile, sizeof tile, "{\"value\":\"%s\",\"subtitle\":\"%s\",\"alert\":\"\"}", val, sub);
     core_post("/api/v1/marketplace/apps/" APP_ID "/state", tile);
