@@ -183,22 +183,22 @@ void inv_soliscloud_sign(const char * key_id, const char * key_secret, const cha
 
 /* ------------------------------------------------- SunSpec / Modbus TCP */
 
-int inv_modbus_req(uint8_t * o, uint16_t tid, uint8_t unit, uint16_t addr, uint16_t count) {
+int inv_modbus_req(uint8_t * o, uint16_t tid, uint8_t unit, uint8_t fc, uint16_t addr, uint16_t count) {
     o[0] = (uint8_t)(tid >> 8);  o[1] = (uint8_t)tid;     /* transaction */
     o[2] = 0; o[3] = 0;                                    /* protocol 0 */
     o[4] = 0; o[5] = 6;                                    /* bytes after this */
     o[6] = unit;
-    o[7] = 3;                                              /* read holding registers */
+    o[7] = fc;                                             /* 3 holding / 4 input registers */
     o[8] = (uint8_t)(addr >> 8); o[9] = (uint8_t)addr;
     o[10] = (uint8_t)(count >> 8); o[11] = (uint8_t)count;
     return 12;
 }
 
-int inv_modbus_resp(const uint8_t * in, int n, uint16_t tid, uint16_t count,
+int inv_modbus_resp(const uint8_t * in, int n, uint16_t tid, uint8_t fc, uint16_t count,
                     uint16_t * regs, char * err, size_t errn) {
     if (n < 9) { snprintf(err, errn, "kort Modbus-antwoord (%d bytes)", n); return 0; }
     if (((in[0] << 8) | in[1]) != tid) { snprintf(err, errn, "Modbus-antwoord hoort bij een ander verzoek"); return 0; }
-    if (in[7] == 0x83) {
+    if (in[7] == (fc | 0x80)) {
         static const char * ex[] = { "", "functie niet ondersteund", "register bestaat niet",
                                      "ongeldige waarde", "apparaatfout" };
         int c = in[8];
@@ -208,7 +208,7 @@ int inv_modbus_resp(const uint8_t * in, int n, uint16_t tid, uint16_t count,
             snprintf(err, errn, "Modbus-fout %d (%s)", c, c >= 1 && c <= 4 ? ex[c] : "onbekend");
         return 0;
     }
-    if (in[7] != 3 || in[8] != count * 2 || n < 9 + count * 2) {
+    if (in[7] != fc || in[8] != count * 2 || n < 9 + count * 2) {
         snprintf(err, errn, "onverwacht Modbus-antwoord");
         return 0;
     }
@@ -275,4 +275,69 @@ void inv_sunspec_string(const uint16_t * regs, int nregs, char * out, size_t n) 
     }
     while (o && out[o - 1] == ' ') o--;
     out[o] = 0;
+}
+
+/* ------------------------------------------ brand Modbus register maps */
+/* Sources (community register lists, to be confirmed per brand by a tester):
+ *  Huawei SUN2000: holding 32080 I32 active power W, 32106 U32 accumulated
+ *    yield 0.01 kWh, 32114 U32 daily yield 0.01 kWh. SDongle port 502 unit 1
+ *    (inverter's own WLAN: port 6607 unit 0); wants ~1 s after connecting.
+ *  Sungrow (WiNet-S, port 502 unit 1): input 5031 U32 total active power W,
+ *    5004 U32 total yield kWh, 5003 U16 daily yield 0.1 kWh; documented
+ *    1-based, low word first.
+ *  Growatt (Modbus RTU protocol II, via an RS485-TCP gateway): input 35 U32
+ *    Pac 0.1 W, 55 U32 Eac total 0.1 kWh, 53 U32 Eac today 0.1 kWh.
+ *  Solis / Ginlong (RS485 Modbus, via a gateway): input 3005 U32 active power
+ *    W, 3009 U32 total energy kWh, 3015 U16 energy today 0.1 kWh; 1-based. */
+static const inv_mb_profile_t MB_PROFILES[] = {
+    { "huawei",        "Huawei",  3, 0, 1000,
+      { 32080, MBV_I32, 1.0 },  { 32106, MBV_U32, 10.0 },  { 32114, MBV_U32, 10.0 } },
+    { "sungrow",       "Sungrow", 4, 1, 0,
+      { 5030, MBV_U32, 1.0 },   { 5003, MBV_U32, 1000.0 }, { 5002, MBV_U16, 100.0 } },
+    { "growatt",       "Growatt", 4, 0, 0,
+      { 35, MBV_U32, 0.1 },     { 55, MBV_U32, 100.0 },    { 53, MBV_U32, 100.0 } },
+    { "solis_modbus",  "Solis",   4, 0, 0,
+      { 3004, MBV_U32, 1.0 },   { 3008, MBV_U32, 1000.0 }, { 3014, MBV_U16, 100.0 } },
+};
+
+const inv_mb_profile_t * inv_mb_profile(const char * type) {
+    for (size_t i = 0; i < sizeof MB_PROFILES / sizeof MB_PROFILES[0]; i++)
+        if (!strcmp(MB_PROFILES[i].type, type)) return &MB_PROFILES[i];
+    return NULL;
+}
+
+int inv_mb_value(const uint16_t * r, int kind, int lo_first, double * out) {
+    if (kind == MBV_U16) {
+        if (r[0] == 0xffff) return 0;
+        *out = r[0];
+        return 1;
+    }
+    uint32_t u = lo_first ? ((uint32_t)r[1] << 16) | r[0] : ((uint32_t)r[0] << 16) | r[1];
+    if (kind == MBV_U32) {
+        if (u == 0xffffffffu) return 0;
+        *out = u;
+        return 1;
+    }
+    if (kind == MBV_I32) {
+        if (u == 0x7fffffffu || u == 0x80000000u) return 0;
+        *out = (int32_t)u;
+        return 1;
+    }
+    return 0;
+}
+
+int inv_mb_parse(const inv_mb_profile_t * p, const uint16_t * pw, const uint16_t * tot,
+                 const uint16_t * day, inv_reading_t * r) {
+    double v;
+    r->power_w = 0; r->today_wh = -1; r->total_wh = -1;
+    if (!inv_mb_value(pw, p->power.kind, p->lo_first, &v)) return 0;
+    r->power_w = v * p->power.scale;
+    if (!inv_mb_value(tot, p->total.kind, p->lo_first, &v) || v <= 0) return 0;
+    r->total_wh = v * p->total.scale;
+    if (day && p->today.kind && inv_mb_value(day, p->today.kind, p->lo_first, &v))
+        r->today_wh = v * p->today.scale;
+    if (r->power_w < 0) r->power_w = 0;               /* night consumption */
+    /* a home inverter: above 1 MW or 100 GWh the map / word order is wrong */
+    if (r->power_w > 1.0e6 || r->total_wh > 1.0e11) return 0;
+    return 1;
 }

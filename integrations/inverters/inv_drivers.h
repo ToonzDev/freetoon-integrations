@@ -42,12 +42,38 @@ void inv_soliscloud_sign(const char * key_id, const char * key_secret, const cha
  * Registers are 16-bit words as read (host order). */
 #include <stdint.h>
 
-/* Modbus TCP "read holding registers" (function 3) request: 12 bytes. */
-int inv_modbus_req(uint8_t * out, uint16_t tid, uint8_t unit, uint16_t addr, uint16_t count);
+/* Modbus TCP read request, fc 3 (holding) or 4 (input registers): 12 bytes. */
+int inv_modbus_req(uint8_t * out, uint16_t tid, uint8_t unit, uint8_t fc, uint16_t addr, uint16_t count);
 /* Parse the answer to that request into regs[count]. 1 = ok; 0 with a reason
  * in err (Modbus exception, wrong transaction, short frame). */
-int inv_modbus_resp(const uint8_t * in, int n, uint16_t tid, uint16_t count,
+int inv_modbus_resp(const uint8_t * in, int n, uint16_t tid, uint8_t fc, uint16_t count,
                     uint16_t * regs, char * err, size_t errn);
+
+/* Brand-specific Modbus register maps (not SunSpec). Addresses are the
+ * on-the-wire (0-based) addresses; the brands' documents often number
+ * registers from 1 (Sungrow 5031 -> 5030, Solis 3005 -> 3004). */
+enum { MBV_NONE = 0, MBV_U16, MBV_U32, MBV_I32 };
+typedef struct {
+    uint16_t addr;
+    uint8_t  kind;          /* MBV_* */
+    double   scale;         /* raw x scale = W (power) or Wh (energy) */
+} inv_mb_field_t;
+typedef struct {
+    const char *   type;    /* inverters.conf TYPE */
+    const char *   brand;   /* for the core's source line */
+    uint8_t        fc;      /* 3 holding, 4 input */
+    uint8_t        lo_first;/* 32-bit values with the low word first */
+    int            connect_delay_ms;
+    inv_mb_field_t power, total, today;
+} inv_mb_profile_t;
+/* Profile for a TYPE, or NULL. */
+const inv_mb_profile_t * inv_mb_profile(const char * type);
+/* One value from its registers; 0 when it is a "no value" pattern. */
+int inv_mb_value(const uint16_t * regs, int kind, int lo_first, double * out);
+/* Fill r from the three fields' registers (today may be NULL). 0 = power or
+ * total missing / implausible. */
+int inv_mb_parse(const inv_mb_profile_t * p, const uint16_t * power, const uint16_t * total,
+                 const uint16_t * today, inv_reading_t * r);
 
 /* "SunS" marker (0x5375 0x6e53) in two registers. */
 int inv_sunspec_marker(const uint16_t * r);

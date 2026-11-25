@@ -17,6 +17,12 @@ permission.
 | `soliscloud` | SolisCloud API `/v1/api/userStationList` | Needs a KeyId + KeySecret requested from Solis. HMAC-SHA1 signed; first station. Polled every 2 min at most. |
 | `omnik` | Logger `/js/status.js` (`webData` / `myDeviceArray`), falls back to `/status.html` | The Omnik portal is gone; local only. |
 | `sunspec` | SunSpec over Modbus TCP (`MB_PORT`, `MB_UNIT`): SolarEdge, SMA, Fronius, Kostal and other SunSpec inverters | Finds the "SunS" marker at register 40000, 50000 or 0, walks the model chain to inverter model 101-103 (integer + scale factor) or 111-113 (float) and reads W (power) and WH (lifetime). One short connection per poll (SolarEdge serves one Modbus client at a time). Modbus TCP must be enabled on the inverter; SolarEdge: port 1502, reliable over a LAN cable, over WiFi only on some firmware. Typical unit ids: SolarEdge / Fronius 1, SMA 126, Kostal 71. Tested against a synthetic SunSpec server only (tests and `sunspec` e2e), not yet on a real inverter. |
+| `huawei` | Huawei SUN2000, holding registers: 32080 I32 power W, 32106 U32 lifetime 0.01 kWh, 32114 U32 today 0.01 kWh | SDongle port 502 unit 1 (Modbus TCP set to unrestricted in FusionSolar), or the inverter's own WLAN on port 6607 unit 0. Waits 1 s after connecting before the first request. |
+| `sungrow` | Sungrow via WiNet-S, input registers 5031 U32 power W, 5004 U32 lifetime kWh, 5003 U16 today 0.1 kWh (documented 1-based: read at 5030 / 5003 / 5002), low word first | Modbus on in the WiNet-S, whitelist off or including the Toon. |
+| `growatt` | Growatt Modbus RTU protocol II, input registers 35 U32 Pac 0.1 W, 55 U32 lifetime 0.1 kWh, 53 U32 today 0.1 kWh | Needs an RS485-to-TCP gateway (Modbus TCP to RTU). |
+| `solis_modbus` | Solis / Ginlong RS485 Modbus, input registers 3005 U32 power W, 3009 U32 lifetime kWh, 3015 U16 today 0.1 kWh (1-based: read at 3004 / 3008 / 3014) | Needs an RS485-to-TCP gateway. |
+
+The brand maps (`MB_PROFILES` in inv_drivers.c) come from community register lists and are tested against synthetic servers built from the same lists; the raw register words are logged once per settings load (`<brand> raw: ...`), so a tester's log shows what the inverter really answers. A wrong scale or word order shows up there and is a one-line fix in the table. GoodWe is not included: older models speak a UDP protocol on port 8899, Modbus TCP on the newer ones has to be enabled by GoodWe support.
 
 ## How it works
 

@@ -181,16 +181,54 @@ static void test_sunspec(void) {
 
     /* Modbus framing */
     uint8_t q[12];
-    CHECK(inv_modbus_req(q, 0x0102, 1, 40069, 52) == 12);
+    CHECK(inv_modbus_req(q, 0x0102, 1, 3, 40069, 52) == 12);
     CHECK(q[0] == 1 && q[1] == 2 && q[5] == 6 && q[6] == 1 && q[7] == 3 && ((q[8] << 8) | q[9]) == 40069 && q[11] == 52);
     uint8_t a[13] = { 1, 2, 0, 0, 0, 7, 1, 3, 4, 0x53, 0x75, 0x6e, 0x53 };
     uint16_t regs[2];
     char err[96];
-    CHECK(inv_modbus_resp(a, 13, 0x0102, 2, regs, err, sizeof err) && regs[0] == 0x5375 && regs[1] == 0x6e53);
-    CHECK(!inv_modbus_resp(a, 13, 0x0103, 2, regs, err, sizeof err));          /* other transaction */
+    CHECK(inv_modbus_resp(a, 13, 0x0102, 3, 2, regs, err, sizeof err) && regs[0] == 0x5375 && regs[1] == 0x6e53);
+    CHECK(!inv_modbus_resp(a, 13, 0x0103, 3, 2, regs, err, sizeof err));       /* other transaction */
+    CHECK(!inv_modbus_resp(a, 13, 0x0102, 4, 2, regs, err, sizeof err));       /* other function */
     uint8_t x[9] = { 1, 2, 0, 0, 0, 3, 1, 0x83, 2 };
-    CHECK(!inv_modbus_resp(x, 9, 0x0102, 2, regs, err, sizeof err) && strstr(err, "register bestaat niet"));
-    CHECK(!inv_modbus_resp(a, 11, 0x0102, 2, regs, err, sizeof err));          /* short */
+    CHECK(!inv_modbus_resp(x, 9, 0x0102, 3, 2, regs, err, sizeof err) && strstr(err, "register bestaat niet"));
+    uint8_t x4[9] = { 1, 2, 0, 0, 0, 3, 1, 0x84, 11 };
+    CHECK(!inv_modbus_resp(x4, 9, 0x0102, 4, 2, regs, err, sizeof err) && strstr(err, "unit-id"));
+    CHECK(!inv_modbus_resp(a, 11, 0x0102, 3, 2, regs, err, sizeof err));       /* short */
+    CHECK(inv_modbus_req(q, 7, 1, 4, 5030, 2) == 12 && q[7] == 4);
+}
+
+/* Brand maps: synthetic register values, scaled as in the profiles. */
+static void test_mb_profiles(void) {
+    inv_reading_t r;
+    const inv_mb_profile_t * hw = inv_mb_profile("huawei"), * sg = inv_mb_profile("sungrow"),
+                           * gw = inv_mb_profile("growatt"), * so = inv_mb_profile("solis_modbus");
+    CHECK(hw && sg && gw && so && !inv_mb_profile("sunspec") && !inv_mb_profile(""));
+    CHECK(hw->fc == 3 && sg->fc == 4 && gw->fc == 4 && so->fc == 4);
+    CHECK(hw->power.addr == 32080 && sg->power.addr == 5030 && gw->power.addr == 35 && so->power.addr == 3004);
+
+    /* Huawei: I32 W, 0.01 kWh counters, high word first */
+    uint16_t p1[2] = { 0, 3456 }, t1[2] = { 0x0017, 0x4876 }, d1[2] = { 0, 1234 };   /* 1525878 x 0.01 kWh */
+    CHECK(inv_mb_parse(hw, p1, t1, d1, &r) && NEAR(r.power_w, 3456) && NEAR(r.total_wh, 15258780) && NEAR(r.today_wh, 12340));
+    uint16_t pneg[2] = { 0xffff, 0xfff6 };                                          /* -10 W at night */
+    CHECK(inv_mb_parse(hw, pneg, t1, NULL, &r) && NEAR(r.power_w, 0) && r.today_wh < 0);
+    uint16_t pnan[2] = { 0x7fff, 0xffff };
+    CHECK(!inv_mb_parse(hw, pnan, t1, NULL, &r));
+
+    /* Sungrow: low word first; total kWh, today U16 0.1 kWh */
+    uint16_t p2[2] = { 2500, 0 }, t2[2] = { 15234, 0 }, d2[1] = { 123 };
+    CHECK(inv_mb_parse(sg, p2, t2, d2, &r) && NEAR(r.power_w, 2500) && NEAR(r.total_wh, 15234000) && NEAR(r.today_wh, 12300));
+    uint16_t t2big[2] = { 0, 15234 };                                               /* words swapped: implausible */
+    CHECK(!inv_mb_parse(sg, p2, t2big, NULL, &r));
+
+    /* Growatt: 0.1 W and 0.1 kWh, high word first */
+    uint16_t p3[2] = { 0, 12345 }, t3[2] = { 0, 45678 }, d3[2] = { 0, 56 };
+    CHECK(inv_mb_parse(gw, p3, t3, d3, &r) && NEAR(r.power_w, 1234.5) && NEAR(r.total_wh, 4567800) && NEAR(r.today_wh, 5600));
+
+    /* Solis: W, kWh, today U16 0.1 kWh */
+    uint16_t p4[2] = { 0, 800 }, t4[2] = { 0, 6543 }, d4[1] = { 13 };
+    CHECK(inv_mb_parse(so, p4, t4, d4, &r) && NEAR(r.power_w, 800) && NEAR(r.total_wh, 6543000) && NEAR(r.today_wh, 1300));
+    uint16_t t0[2] = { 0, 0 };
+    CHECK(!inv_mb_parse(so, p4, t0, NULL, &r));                                     /* no counter */
 }
 
 int main(void) {
@@ -201,6 +239,7 @@ int main(void) {
     test_stick();
     test_soliscloud();
     test_sunspec();
+    test_mb_profiles();
     printf("%d/%d checks passed\n", runs - fails, runs);
     return fails != 0;
 }
