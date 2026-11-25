@@ -590,27 +590,68 @@ static double today_from_lifetime(double wh) {
     return wh - g_day_start_wh;
 }
 
-static void enphase_live_power(inv_reading_t * rd) {
+/* 0.2.2 fell back to /api/v1/production for 30 min after one failed
+ * production.json read: on the reporter's Envoy that is the frozen 386 W, so
+ * the tile jumped back to it after a few minutes (user report, 2026-11-25).
+ * Now: once production.json has answered (or v1 is known to be frozen), its
+ * failure is reported as an error with the reason and retried every poll;
+ * v1's numbers are used only for an Envoy where production.json never
+ * worked. "v1 frozen" (its lifetime stands still for 30 min while
+ * production.json's rises) is remembered in envoy_v1_frozen. */
+static int    g_pj_ever;                /* production.json answered since the settings load */
+static int    g_v1_frozen = -1;         /* -1 not read yet, 0 no, 1 yes (file) */
+static double g_frz_v1_wh = -1, g_frz_pj_wh = -1;
+static time_t g_frz_since;
+
+static int v1_frozen(void) {
+    if (g_v1_frozen < 0) {
+        char path[300];
+        path_in_dir(path, sizeof path, "envoy_v1_frozen");
+        g_v1_frozen = access(path, F_OK) == 0;
+        if (g_v1_frozen) logf_("Enphase: /api/v1/production is known to be frozen on this Envoy (envoy_v1_frozen)");
+    }
+    return g_v1_frozen;
+}
+
+static void v1_frozen_check(double v1_wh, double pj_wh, time_t now) {
+    if (g_v1_frozen == 1 || v1_wh <= 0 || pj_wh <= 0) return;
+    if (g_frz_since == 0 || v1_wh != g_frz_v1_wh) {      /* v1 moved: start over */
+        g_frz_since = now; g_frz_v1_wh = v1_wh; g_frz_pj_wh = pj_wh;
+        return;
+    }
+    const char * fs = getenv("INV_FROZEN_S");          /* tests */
+    long frozen_s = fs && atol(fs) > 0 ? atol(fs) : 1800;
+    if (now - g_frz_since >= frozen_s && pj_wh > g_frz_pj_wh) {
+        g_v1_frozen = 1;
+        char path[300];
+        path_in_dir(path, sizeof path, "envoy_v1_frozen");
+        FILE * f = fopen(path, "w");
+        if (f) { fprintf(f, "v1 lifetime %.0f Wh unchanged for 30 min while production.json rose %.0f -> %.0f Wh\n",
+                         v1_wh, g_frz_pj_wh, pj_wh); fclose(f); }
+        logf_("Enphase: /api/v1/production lifetime stuck at %.0f Wh for 30 min while /production.json rose to %.0f Wh: "
+              "not using /api/v1/production numbers any more", v1_wh, pj_wh);
+    }
+}
+
+/* 1 = rd filled from production.json, 0 = failed (why in why[]). */
+static int enphase_production(inv_reading_t * rd, char * why, size_t whyn) {
     time_t now = time(NULL);
-    if (g_pj_state == 0 && now < g_pj_next) return;
     char url[256], auth[2100];
     resp_t r;
     const char * hdr[] = { auth, "Accept: application/json", NULL };
     int https = g_envoy_mode == 2;
-    snprintf(url, sizeof url, "%s://%s/production.json?details=1", https ? "https" : "http", g_conf.host);
+    snprintf(url, sizeof url, "%s://%s/production.json", https ? "https" : "http", g_conf.host);
     if (https) snprintf(auth, sizeof auth, "Authorization: Bearer %s", g_envoy_tok);
-    if (http_req(url, https ? hdr : NULL, NULL, NULL, https, 15, &r) != 0) return;
+    if (http_req(url, https ? hdr : NULL, NULL, NULL, https, 25, &r) != 0) { snprintf(why, whyn, "curl ontbreekt"); return 0; }
     inv_envoy_prod_t pj;
     int ok = r.code == 200 && inv_parse_envoy_production(r.body, &pj);
-    int code = r.code;
+    int code = r.code, crc = r.curl;
     resp_free(&r);
     if (!ok) {
-        if (g_pj_state != 0)
-            logf_("Enphase: %s, readings from /api/v1/production",
-                  code ? "no /production.json" : "/production.json not reachable");
-        g_pj_state = 0;
-        g_pj_next = now + 1800;
-        return;
+        if (code == 0) snprintf(why, whyn, "/production.json gaf geen antwoord (%s)", curl_why(crc));
+        else if (code == 200) snprintf(why, whyn, "/production.json zonder bruikbare productie");
+        else snprintf(why, whyn, "/production.json: HTTP %d", code);
+        return 0;
     }
     if (pj.have_inv && pj.inv_time > 0) {          /* say so when the reports go stale */
         long age = (long)(now - pj.inv_time) / 60;
@@ -626,17 +667,34 @@ static void enphase_live_power(inv_reading_t * rd) {
     if (pj.have_inv && pj.inv_wh > 0) {
         rd->total_wh = pj.inv_wh;
         rd->today_wh = today_from_lifetime(pj.inv_wh);
+        v1_frozen_check(v1_wh, pj.inv_wh, now);
     }
     if (g_pj_state != 1)
         logf_("Enphase: readings from /production.json: power %.0f W (%s), lifetime %.0f Wh "
               "(/api/v1/production said %.0f W, %.0f Wh)", rd->power_w,
               pj.have_eim ? "production CT" : "microinverter reports", rd->total_wh, v1_w, v1_wh);
     g_pj_state = 1;
+    g_pj_ever = 1;
+    return 1;
 }
 
 static int poll_enphase(inv_reading_t * rd, char * msg, size_t msgn) {
+    /* v1 first: it finds plain HTTP vs HTTPS and gets / renews the token */
     if (!poll_enphase_v1(rd, msg, msgn)) return 0;
-    enphase_live_power(rd);
+    time_t now = time(NULL);
+    int must = g_pj_ever || v1_frozen();          /* v1's numbers are not to be trusted here */
+    if (!must && g_pj_state == 0 && now < g_pj_next) return 1;   /* older Envoy: v1 only */
+    char why[160] = "";
+    if (enphase_production(rd, why, sizeof why)) return 1;
+    if (must) {
+        if (g_pj_state != 2) logf_("Enphase: %s; no reading this round (not falling back to /api/v1/production)", why);
+        g_pj_state = 2;
+        snprintf(msg, msgn, "Envoy: %s", why);
+        return 0;
+    }
+    if (g_pj_state != 0) logf_("Enphase: %s, readings from /api/v1/production", why);
+    g_pj_state = 0;
+    g_pj_next = now + 1800;
     return 1;
 }
 
@@ -896,6 +954,8 @@ int main(int argc, char ** argv) {
             g_mb_logged = 0;
             g_pj_state = -1;
             g_inv_age_logged = -1;
+            g_pj_ever = 0;
+            g_frz_since = 0;
             last_ok = -1;
             zero_polls = 0;
         }
