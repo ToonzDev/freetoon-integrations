@@ -22,6 +22,7 @@
 #include "inv_drivers.h"
 #include "minijson.h"
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
@@ -63,6 +64,10 @@ typedef struct {
     char solis_api[128];
     char mb_port[8];          /* sunspec: Modbus TCP port */
     char mb_unit[8];          /* sunspec: Modbus unit id */
+    char se_client_id[128];   /* solaredge_cloud: Site Access app (developer.solaredge.com) */
+    char se_client_secret[128];
+    char se_redirect[256];    /* the Redirect URI registered with that app */
+    char se_auth[1200];       /* fallback: the address SolarEdge sent the browser to (code=...) */
     int  interval;            /* s */
 } conf_t;
 
@@ -93,6 +98,8 @@ static void set_field(conf_t * c, const char * k, const char * v) {
     S("STICK_USER", stick_user) S("STICK_PASS", stick_pass)
     S("SOLIS_KEY_ID", solis_key_id) S("SOLIS_KEY_SECRET", solis_key_secret)
     S("SOLIS_API", solis_api) S("MB_PORT", mb_port) S("MB_UNIT", mb_unit)
+    S("SE_CLIENT_ID", se_client_id) S("SE_CLIENT_SECRET", se_client_secret)
+    S("SE_REDIRECT", se_redirect) S("SE_AUTH", se_auth)
 #undef S
     if (!strcmp(k, "INTERVAL")) c->interval = atoi(v);
 }
@@ -321,6 +328,7 @@ static const char * brand_name(void) {
     static char b[40];
     const inv_mb_profile_t * mp = inv_mb_profile(g_conf.type);
     if (mp) return mp->brand;
+    if (!strcmp(g_conf.type, "solaredge_cloud")) return "SolarEdge cloud";
     if (strcmp(g_conf.type, "sunspec") || !g_ss_mfr[0]) return g_conf.type;
     size_t o = 0;
     for (const char * p = g_ss_mfr; *p && o + 1 < sizeof b; p++)
@@ -809,6 +817,355 @@ static int poll_soliscloud(inv_reading_t * rd, char * msg, size_t msgn) {
     return ok;
 }
 
+/* ---------------------------------------------------- SolarEdge cloud */
+/* Monitoring API v2 ("SolarEdge ONE for Developers"; v1 with the old site API
+ * key was switched off in November 2026). A homeowner makes a "Site Access"
+ * app on developer.solaredge.com and gets a client id + secret. Linking is an
+ * OAuth authorization-code flow: the /solar page (core 1.0.22+) has a
+ * "Koppelen" button to connect.solaredge.com/authorize; after approval
+ * SolarEdge sends the browser to the registered Redirect URI with
+ * ?code=...&site_id=... . When that is the Toon (/solar/callback) the core
+ * drops the query in oauth_callback here; otherwise the user pastes the
+ * address into SE_AUTH. The code is traded for an access token (about 2 h)
+ * and a refresh token that changes on every refresh (so it is stored each
+ * time, in solaredge.state). The grant lasts 24 months.
+ *
+ * Wire details follow the published open-source clients (Home Assistant
+ * solaredge_v2, Domoticz, ecoflow): JSON token requests with client id and
+ * secret in the body, Bearer calls, /sites/{id}/power (quarter-hour values,
+ * 15-30 min behind) and /sites/{id}/lifetime-energy.
+ *
+ * Budget: the free tier has ~2000 calls a month (10 a minute). Power every
+ * 30 min and the lifetime counter every 2 h, 06:00-22:00 only: ~40 calls a
+ * day plus token refreshes, ~1500 a month. In between the last values are
+ * reported. "Monthly credit limit reached" (HTTP 429) pauses until the 1st. */
+#define SE_API   "https://monitoringapi.solaredge.com/v2"
+#define SE_STATE "solaredge.state"
+
+typedef struct {
+    char   client[128];          /* tokens belong to this client id */
+    char   refresh[2048];
+    char   access[4096];
+    time_t exp;
+    char   site[32];
+    char   code_done[512];       /* last authorization code used (single use) */
+    time_t pause_until;
+    time_t power_t, total_t;     /* last successful reads */
+    double power_w, total_wh;
+} se_state_t;
+
+static se_state_t g_se;
+static int g_se_loaded;
+
+/* INV_SE_API: a test server instead of SolarEdge (tests/e2e only). */
+static const char * se_api(void) {
+    const char * e = getenv("INV_SE_API");
+    return (e && *e) ? e : SE_API;
+}
+
+static void se_save(void) {
+    char path[300], tmp[310];
+    path_in_dir(path, sizeof path, SE_STATE);
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) return;
+    FILE * f = fdopen(fd, "w");
+    if (!f) { close(fd); return; }
+    fprintf(f, "client=%s\nrefresh=%s\naccess=%s\nexp=%ld\nsite=%s\ncode_done=%s\npause_until=%ld\n"
+               "power_t=%ld\npower_w=%.0f\ntotal_t=%ld\ntotal_wh=%.0f\n",
+            g_se.client, g_se.refresh, g_se.access, (long)g_se.exp, g_se.site, g_se.code_done,
+            (long)g_se.pause_until, (long)g_se.power_t, g_se.power_w, (long)g_se.total_t, g_se.total_wh);
+    fclose(f);
+    rename(tmp, path);
+}
+
+static void se_load(void) {
+    if (g_se_loaded) return;
+    g_se_loaded = 1;
+    memset(&g_se, 0, sizeof g_se);
+    char path[300];
+    path_in_dir(path, sizeof path, SE_STATE);
+    FILE * f = fopen(path, "r");
+    if (!f) return;
+    static char line[4400];
+    while (fgets(line, sizeof line, f)) {
+        line[strcspn(line, "\r\n")] = 0;
+        char * eq = strchr(line, '=');
+        if (!eq) continue;
+        *eq = 0;
+        const char * k = line, * v = eq + 1;
+#define SS(key, field) if (!strcmp(k, key)) snprintf(g_se.field, sizeof g_se.field, "%s", v);
+        SS("client", client) SS("refresh", refresh) SS("access", access) SS("site", site) SS("code_done", code_done)
+#undef SS
+        if (!strcmp(k, "exp")) g_se.exp = (time_t)atol(v);
+        if (!strcmp(k, "pause_until")) g_se.pause_until = (time_t)atol(v);
+        if (!strcmp(k, "power_t")) g_se.power_t = (time_t)atol(v);
+        if (!strcmp(k, "total_t")) g_se.total_t = (time_t)atol(v);
+        if (!strcmp(k, "power_w")) g_se.power_w = atof(v);
+        if (!strcmp(k, "total_wh")) g_se.total_wh = atof(v);
+    }
+    fclose(f);
+}
+
+/* Value of query parameter `key` in s ("...?a=1&code=xyz&site_id=9"), URL-decoded. */
+static int query_param(const char * s, const char * key, char * out, size_t n) {
+    size_t kl = strlen(key);
+    for (const char * p = s; (p = strstr(p, key)) != NULL; p += kl) {
+        if (p != s && p[-1] != '?' && p[-1] != '&') continue;
+        if (p[kl] != '=') continue;
+        const char * v = p + kl + 1;
+        size_t o = 0;
+        for (; *v && *v != '&' && *v != '#' && !isspace((unsigned char)*v) && o + 1 < n; v++) {
+            if (*v == '%' && isxdigit((unsigned char)v[1]) && isxdigit((unsigned char)v[2])) {
+                char hx[3] = { v[1], v[2], 0 };
+                out[o++] = (char)strtol(hx, NULL, 16);
+                v += 2;
+            } else out[o++] = (*v == '+') ? ' ' : *v;
+        }
+        out[o] = 0;
+        return o > 0;
+    }
+    return 0;
+}
+
+/* POST to the token endpoint. 1 = new tokens stored, 0 = failed (msg set,
+ * *http = status). */
+static int se_token(const char * grant, const char * value, int with_redirect, char * msg, size_t msgn, int * http) {
+    static char body[4600];
+    char ci[260], cs[260], rd[520];
+    static char ev[2200];
+    json_esc(g_conf.se_client_id, ci, sizeof ci);
+    json_esc(g_conf.se_client_secret, cs, sizeof cs);
+    json_esc(value, ev, sizeof ev);
+    json_esc(g_conf.se_redirect, rd, sizeof rd);
+    int is_code = !strcmp(grant, "authorization_code");
+    snprintf(body, sizeof body,
+             "{\"grant_type\":\"%s\",\"%s\":\"%s\",\"client_id\":\"%s\",\"client_secret\":\"%s\"%s%s%s}",
+             grant, is_code ? "code" : "refresh_token", ev, ci, cs,
+             with_redirect ? ",\"redirect_uri\":\"" : "", with_redirect ? rd : "", with_redirect ? "\"" : "");
+    const char * h[] = { "Content-Type: application/json", "Accept: application/json", NULL };
+    resp_t r;
+    *http = 0;
+    char turl[300];
+    snprintf(turl, sizeof turl, "%s/oauth2/token", se_api());
+    if (http_req(turl, h, body, NULL, 0, 25, &r) != 0) { snprintf(msg, msgn, "curl ontbreekt"); return 0; }
+    *http = r.code;
+    int ok = 0;
+    if (r.code == 200) {
+        char acc[4096] = "", ref[2048] = "";
+        double exp_in = 7200;
+        mj_str(r.body, "access_token", acc, sizeof acc);
+        mj_str(r.body, "refresh_token", ref, sizeof ref);
+        mj_num(r.body, "expires_in", &exp_in);
+        if (acc[0]) {
+            snprintf(g_se.access, sizeof g_se.access, "%s", acc);
+            if (ref[0]) snprintf(g_se.refresh, sizeof g_se.refresh, "%s", ref);
+            if (exp_in < 60) exp_in = 60;
+            g_se.exp = time(NULL) + (time_t)exp_in;
+            snprintf(g_se.client, sizeof g_se.client, "%s", g_conf.se_client_id);
+            se_save();
+            ok = 1;
+        } else snprintf(msg, msgn, "SolarEdge: antwoord zonder access_token");
+    } else if (r.code == 0) {
+        snprintf(msg, msgn, "SolarEdge niet bereikbaar (%s)", curl_why(r.curl));
+    } else {
+        char e[120] = "", d[200] = "";
+        mj_str(r.body, "error", e, sizeof e);
+        mj_str(r.body, "error_description", d, sizeof d);
+        if (!d[0]) mj_str(r.body, "message", d, sizeof d);
+        snprintf(msg, msgn, "SolarEdge weigert (HTTP %d%s%s%s%s)", r.code, e[0] ? ", " : "", e, d[0] ? ": " : "", d);
+        logf_("SolarEdge token (%s): HTTP %d %.200s", grant, r.code, r.body ? r.body : "");
+    }
+    resp_free(&r);
+    return ok;
+}
+
+/* A fresh code from the callback file (core) or the pasted address. */
+static void se_take_code(char * msg, size_t msgn) {
+    char path[300], src[1400] = "";
+    path_in_dir(path, sizeof path, "oauth_callback");
+    FILE * f = fopen(path, "r");
+    int from_file = 0;
+    if (f) {
+        size_t k = fread(src, 1, sizeof src - 1, f);
+        src[k] = 0;
+        fclose(f);
+        unlink(path);
+        from_file = 1;
+    } else if (strstr(g_conf.se_auth, "code=")) {
+        snprintf(src, sizeof src, "%s", g_conf.se_auth);
+    }
+    if (!src[0]) return;
+    char code[512] = "", site[32] = "", err[120] = "";
+    if (!query_param(src, "code", code, sizeof code)) {
+        if (query_param(src, "error", err, sizeof err))
+            snprintf(msg, msgn, "SolarEdge gaf geen toestemming (%s)", err);
+        else if (from_file)
+            snprintf(msg, msgn, "terugkeeradres zonder code");
+        return;
+    }
+    if (!strcmp(code, g_se.code_done)) return;        /* already used (codes are single use) */
+    query_param(src, "site_id", site, sizeof site);
+    snprintf(g_se.code_done, sizeof g_se.code_done, "%s", code);
+    se_save();
+    int http;
+    int ok = se_token("authorization_code", code, 0, msg, msgn, &http);
+    if (!ok && http >= 400 && http < 500 && g_conf.se_redirect[0])
+        ok = se_token("authorization_code", code, 1, msg, msgn, &http);   /* some servers want redirect_uri */
+    if (!ok) { logf_("SolarEdge: linking failed: %s", msg); return; }
+    if (site[0]) snprintf(g_se.site, sizeof g_se.site, "%s", site);
+    g_se.power_t = g_se.total_t = 0;                  /* read right away */
+    g_se.pause_until = 0;
+    se_save();
+    logf_("SolarEdge: linked (site %s)", g_se.site[0] ? g_se.site : "?");
+}
+
+/* A valid access token, refreshed when it (nearly) ran out. */
+static int se_access(char * msg, size_t msgn) {
+    if (!g_se.refresh[0] && !g_se.access[0]) {
+        snprintf(msg, msgn, "nog niet gekoppeld: sla client-ID en secret op en klik op 'Koppelen met SolarEdge'");
+        return 0;
+    }
+    if (g_se.access[0] && time(NULL) < g_se.exp - 300) return 1;
+    if (!g_se.refresh[0]) { snprintf(msg, msgn, "koppeling verlopen: klik opnieuw op 'Koppelen met SolarEdge'"); return 0; }
+    int http;
+    if (se_token("refresh_token", g_se.refresh, 0, msg, msgn, &http)) return 1;
+    if (http == 400 || http == 401) {                 /* the grant is gone: link again */
+        g_se.refresh[0] = g_se.access[0] = 0;
+        se_save();
+        snprintf(msg, msgn, "koppeling verlopen of ingetrokken: klik opnieuw op 'Koppelen met SolarEdge'");
+    }
+    return 0;
+}
+
+/* GET SE_API + path. Returns the HTTP status (0 = no answer); body in *r.
+ * Handles the credit limit: HTTP 429. */
+static int se_get(const char * path, resp_t * r, char * msg, size_t msgn) {
+    char url[400];
+    static char auth[4200];
+    snprintf(url, sizeof url, "%s%s", se_api(), path);
+    snprintf(auth, sizeof auth, "Authorization: Bearer %s", g_se.access);
+    const char * h[] = { auth, "Accept: application/json", NULL };
+    if (http_req(url, h, NULL, NULL, 0, 25, r) != 0) { snprintf(msg, msgn, "curl ontbreekt"); return 0; }
+    if (r->code == 429) {
+        time_t now = time(NULL);
+        if (r->body && (strstr(r->body, "credit") || strstr(r->body, "Credit"))) {
+            struct tm tm;
+            localtime_r(&now, &tm);
+            tm.tm_mday = 1; tm.tm_mon += 1; tm.tm_hour = 0; tm.tm_min = 5; tm.tm_sec = 0; tm.tm_isdst = -1;
+            g_se.pause_until = mktime(&tm);
+            snprintf(msg, msgn, "maandtegoed van de SolarEdge-API is op (weer vanaf de 1e)");
+        } else {
+            g_se.pause_until = now + 300;
+            snprintf(msg, msgn, "SolarEdge: te veel verzoeken, over 5 min opnieuw");
+        }
+        se_save();
+        logf_("SolarEdge: HTTP 429 %.160s", r->body ? r->body : "");
+    } else if (r->code == 401) {
+        g_se.access[0] = 0;                           /* refresh on the next poll */
+        snprintf(msg, msgn, "SolarEdge: toegang geweigerd (HTTP 401)");
+    } else if (r->code == 0) {
+        snprintf(msg, msgn, "SolarEdge niet bereikbaar (%s)", curl_why(r->curl));
+    } else if (r->code != 200) {
+        snprintf(msg, msgn, "SolarEdge: HTTP %d", r->code);
+        logf_("SolarEdge %s: HTTP %d %.200s", path, r->code, r->body ? r->body : "");
+    }
+    return r->code;
+}
+
+static double se_unit_factor(const char * u) {
+    if (!u || !*u) return 1;
+    char c = (char)toupper((unsigned char)u[0]);
+    if (c == 'K') return 1e3;
+    if (c == 'M') return 1e6;
+    if (c == 'G') return 1e9;
+    return 1;
+}
+
+static int poll_solaredge(inv_reading_t * rd, char * msg, size_t msgn) {
+    se_load();
+    if (!g_conf.se_client_id[0] || !g_conf.se_client_secret[0]) {
+        snprintf(msg, msgn, "vul client-ID en secret van je SolarEdge-app in");
+        return 0;
+    }
+    if (g_se.client[0] && strcmp(g_se.client, g_conf.se_client_id)) {   /* another app: start over */
+        char keep[512];
+        snprintf(keep, sizeof keep, "%s", g_se.code_done);
+        memset(&g_se, 0, sizeof g_se);
+        snprintf(g_se.code_done, sizeof g_se.code_done, "%s", keep);
+        se_save();
+    }
+    se_take_code(msg, msgn);
+    if (msg[0]) return 0;
+
+    time_t now = time(NULL);
+    struct tm lt;
+    localtime_r(&now, &lt);
+    int day = lt.tm_hour >= 6 && lt.tm_hour < 22;
+    int need_power = day && now - g_se.power_t >= 30 * 60;
+    int need_total = (day && now - g_se.total_t >= 2 * 3600) || !g_se.total_t;
+    char err[200] = "";
+
+    if ((need_power || need_total) && now >= g_se.pause_until) {
+        if (!se_access(msg, msgn)) return 0;
+        if (!g_se.site[0]) {
+            snprintf(msg, msgn, "site-ID onbekend: koppel opnieuw (het terugkeeradres hoort site_id= te bevatten)");
+            return 0;
+        }
+        char path[200];
+        resp_t r;
+        if (need_power) {
+            char f1[32], t1[32];
+            time_t from = now - 2 * 3600;
+            struct tm g;
+            gmtime_r(&from, &g); strftime(f1, sizeof f1, "%Y-%m-%dT%H%%3A%M%%3A%SZ", &g);
+            gmtime_r(&now, &g);  strftime(t1, sizeof t1, "%Y-%m-%dT%H%%3A%M%%3A%SZ", &g);
+            snprintf(path, sizeof path, "/sites/%s/power?from=%s&to=%s&resolution=QUARTER_HOUR&unit=W", g_se.site, f1, t1);
+            if (se_get(path, &r, err, sizeof err) == 200) {
+                char u[16] = "";
+                mj_str(r.body, "unit", u, sizeof u);
+                double last = -1;
+                for (int i = 0; i < 64; i++) {
+                    char ip[24];
+                    snprintf(ip, sizeof ip, "values[%d]", i);
+                    const char * e = mj_find(r.body, ip, NULL);
+                    if (!e) break;
+                    double v;
+                    const char * vp = mj_find(e, "value", NULL);
+                    if (vp && *vp != 'n' && mj_num(e, "value", &v)) last = v;
+                }
+                g_se.power_w = last >= 0 ? last * se_unit_factor(u) : 0;
+                g_se.power_t = now;
+                se_save();
+            }
+            resp_free(&r);
+        }
+        if (need_total && !err[0]) {
+            snprintf(path, sizeof path, "/sites/%s/lifetime-energy", g_se.site);
+            if (se_get(path, &r, err, sizeof err) == 200) {
+                double e;
+                char u[16] = "";
+                mj_str(r.body, "unit", u, sizeof u);
+                if (mj_num(r.body, "energy", &e) && e > 0) {
+                    g_se.total_wh = e * se_unit_factor(u);
+                    g_se.total_t = now;
+                    se_save();
+                } else snprintf(err, sizeof err, "SolarEdge: geen totaal in het antwoord");
+            }
+            resp_free(&r);
+        }
+    }
+    if (!g_se.power_t && !g_se.total_t) {
+        snprintf(msg, msgn, "%s", err[0] ? err : (now < g_se.pause_until ? "SolarEdge: even wachten (tegoed)" : "SolarEdge: nog geen meting"));
+        return 0;
+    }
+    if (err[0]) logf_("SolarEdge: %s (last values kept)", err);
+    rd->power_w = (day && now - g_se.power_t < 3600) ? g_se.power_w : 0;
+    rd->total_wh = g_se.total_t ? g_se.total_wh : -1;
+    rd->today_wh = g_se.total_t ? today_from_lifetime(g_se.total_wh) : -1;
+    return 1;
+}
+
 /* ------------------------------------------------ SunSpec / Modbus TCP */
 /* Generic SunSpec reader: find the "SunS" marker (40000, 50000 or 0), walk
  * the model chain to the inverter model (101-103 integer + scale factor,
@@ -1017,6 +1374,7 @@ int main(int argc, char ** argv) {
         else if (!strcmp(t, "sunspec"))     ok = poll_sunspec(&rd, msg, sizeof msg);
         else if (mbp)                       ok = poll_mbprofile(mbp, &rd, msg, sizeof msg);
         else if (!strcmp(t, "soliscloud")) { cloud = 1; ok = poll_soliscloud(&rd, msg, sizeof msg); }
+        else if (!strcmp(t, "solaredge_cloud")) { cloud = 1; ok = poll_solaredge(&rd, msg, sizeof msg); }
         else snprintf(msg, sizeof msg, "onbekend type '%s'", t);
 
         report(ok, &rd, ok ? "" : msg);
@@ -1043,6 +1401,8 @@ int main(int argc, char ** argv) {
                 path_in_dir(path, sizeof path, CONF_NAME);
                 time_t mt = stat(path, &st) == 0 ? st.st_mtime : 0;
                 if (mt != g_conf_mtime) break;
+                path_in_dir(path, sizeof path, "oauth_callback");   /* SolarEdge link: act now */
+                if (stat(path, &st) == 0) break;
             }
         }
     }

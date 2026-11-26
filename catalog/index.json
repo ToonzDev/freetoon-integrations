@@ -73,10 +73,10 @@
     {
       "id": "inverters",
       "name": "Omvormers",
-      "version": "0.2.4",
-      "description": "Zonnepanelen via de omvormer: Enphase Envoy, Solis (SolisCloud), Omnik, SunSpec via Modbus TCP (SolarEdge, SMA, Fronius, Kostal), Huawei, Sungrow, Growatt. Instellen op de webpagina :10081/solar.",
+      "version": "0.3.0",
+      "description": "Zonnepanelen via de omvormer: Enphase Envoy, Solis (SolisCloud), Omnik, SolarEdge (cloud), SunSpec via Modbus TCP (SolarEdge, SMA, Fronius, Kostal), Huawei, Sungrow, Growatt. Instellen op de webpagina :10081/solar.",
       "url": "https://raw.githubusercontent.com/ToonzDev/freetoon-integrations/main/packages/inverters.tgz",
-      "min_toonui": "1.0.18"
+      "min_toonui": "1.0.22"
     },
     {
       "id": "verkeer",
