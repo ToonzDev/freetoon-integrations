@@ -20,6 +20,7 @@
  * Env (tests): INV_DIR = settings dir, INV_CORE = core host:port.
  */
 #include "inv_drivers.h"
+#include "inv_crypto.h"
 #include "minijson.h"
 #include <arpa/inet.h>
 #include <ctype.h>
@@ -67,6 +68,9 @@ typedef struct {
     char se_client_id[128];   /* solaredge_cloud: Site Access app (developer.solaredge.com) */
     char se_client_secret[128];
     char se_redirect[256];    /* the Redirect URI registered with that app */
+    char gw_user[128];        /* goodwe_sems: SEMS+ account (e-mail) */
+    char gw_pass[128];
+    char gw_station[96];      /* installation name; "" = the first one */
     char se_auth[1200];       /* fallback: the address SolarEdge sent the browser to (code=...) */
     int  interval;            /* s */
 } conf_t;
@@ -100,6 +104,7 @@ static void set_field(conf_t * c, const char * k, const char * v) {
     S("SOLIS_API", solis_api) S("MB_PORT", mb_port) S("MB_UNIT", mb_unit)
     S("SE_CLIENT_ID", se_client_id) S("SE_CLIENT_SECRET", se_client_secret)
     S("SE_REDIRECT", se_redirect) S("SE_AUTH", se_auth)
+    S("GW_USER", gw_user) S("GW_PASS", gw_pass) S("GW_STATION", gw_station)
 #undef S
     if (!strcmp(k, "INTERVAL")) c->interval = atoi(v);
 }
@@ -329,6 +334,7 @@ static const char * brand_name(void) {
     const inv_mb_profile_t * mp = inv_mb_profile(g_conf.type);
     if (mp) return mp->brand;
     if (!strcmp(g_conf.type, "solaredge_cloud")) return "SolarEdge cloud";
+    if (!strcmp(g_conf.type, "goodwe_sems")) return "GoodWe SEMS+";
     if (strcmp(g_conf.type, "sunspec") || !g_ss_mfr[0]) return g_conf.type;
     size_t o = 0;
     for (const char * p = g_ss_mfr; *p && o + 1 < sizeof b; p++)
@@ -1166,6 +1172,190 @@ static int poll_solaredge(inv_reading_t * rd, char * msg, size_t msgn) {
     return 1;
 }
 
+/* ---------------------------------------------------- GoodWe SEMS+ */
+/* GoodWe closed the classic SEMS portal on 2026-09-23; SEMS+ is the way in
+ * now. Ported from the solarPanel app's GOODWE1/GOODWE2 v2.1.0 plugin
+ * (oepi-loepi & WickedMaster, ToonSoftwareCollective/solarpanel-plugins):
+ *   POST semsplus.goodwe.com .../auth/cross-login   pwd = base64(md5hex(pw))
+ *   POST eu-gateway .../stations/simple-query        station (by name, else first)
+ *   GET  .../stations/device/all-status?stationId=   inverter serial + deviceType
+ *   GET  .../equipments/<sn>/telemetry               pAc (kW)
+ *   GET  .../equipments/<sn>/telecounting&groups=telecounting_today / _lifetime
+ *                                                    proPvStatsToday / proPvStatsTotal (kWh)
+ * Every call carries a "token" header (JSON with uid / timestamp / token) and
+ * X-Signature = base64(sha256hex(ms@uid@token) + "@" + ms). Logged in once per
+ * poll; station and serial are kept until the settings change. */
+#define GW_LOGIN "https://semsplus.goodwe.com/web/sems/sems-user/api/v1/auth/cross-login"
+#define GW_API   "https://eu-gateway.semsportal.com/web/sems/sems-plant/api"
+static char g_gw_station_id[64], g_gw_sn[64], g_gw_type[32];
+/* INV_GW_LOGIN / INV_GW_API: a test server instead of GoodWe (tests only). */
+static const char * gw_login_url(void) { const char * e = getenv("INV_GW_LOGIN"); return (e && *e) ? e : GW_LOGIN; }
+static const char * gw_api(void) { const char * e = getenv("INV_GW_API"); return (e && *e) ? e : GW_API; }
+
+static void gw_ms(char * out, size_t n) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    snprintf(out, n, "%lld", (long long)tv.tv_sec * 1000LL + tv.tv_usec / 1000);
+}
+static void gw_headers(const char * uid, const char * ts, const char * tok, char * h_tok, size_t tn, char * h_sig, size_t sn) {
+    char ms[24], in[400], hex[65], cat[100];
+    uint8_t d[32];
+    gw_ms(ms, sizeof ms);
+    snprintf(in, sizeof in, "%s@%s@%s", ms, uid, tok);
+    inv_sha256(in, strlen(in), d);
+    for (int i = 0; i < 32; i++) snprintf(hex + 2 * i, 3, "%02x", d[i]);
+    snprintf(cat, sizeof cat, "%s@%s", hex, ms);
+    char b64[160];
+    inv_b64((const uint8_t *)cat, strlen(cat), b64);
+    snprintf(h_tok, tn, "token: {\"uid\":\"%s\",\"timestamp\":%s,\"token\":\"%s\",\"client\":\"semsPlusWeb\",\"version\":\"\",\"language\":\"en\"}",
+             uid, ts[0] ? ts : "0", tok);
+    snprintf(h_sig, sn, "X-Signature: %s", b64);
+}
+/* "code" of a SEMS+ answer is ok ("00000" / "0" / "200"). */
+static int gw_ok(const char * body) {
+    char c[16] = "";
+    mj_str(body, "code", c, sizeof c);
+    return !strcmp(c, "00000") || !strcmp(c, "0") || !strcmp(c, "200");
+}
+/* value of factor `code` in a factors answer (data[g].factors[f]) */
+static int gw_factor(const char * body, const char * code, double * v) {
+    for (int g = 0; g < 16; g++) {
+        char p[48];
+        snprintf(p, sizeof p, "data[%d]", g);
+        const char * grp = mj_find(body, p, NULL);
+        if (!grp) break;
+        for (int f = 0; f < 64; f++) {
+            char fp[32], c[48] = "";
+            snprintf(fp, sizeof fp, "factors[%d]", f);
+            const char * fac = mj_find(grp, fp, NULL);
+            if (!fac) break;
+            if (mj_str(fac, "code", c, sizeof c) && !strcmp(c, code)) {
+                const char * dv = mj_find(fac, "data", NULL);
+                if (!dv || *dv == 'n') return 0;
+                return mj_num(fac, "data", v);
+            }
+        }
+    }
+    return 0;
+}
+static int gw_call(const char * url, const char * body, const char * uid, const char * ts, const char * tok,
+                   resp_t * r, char * msg, size_t msgn) {
+    char h_tok[600], h_sig[200];
+    gw_headers(uid, ts, tok, h_tok, sizeof h_tok, h_sig, sizeof h_sig);
+    const char * h[] = { "Content-Type: application/json; charset=utf-8", "Accept: application/json, text/plain, */*",
+                         "Origin: https://semsplus.goodwe.com", "Referer: https://semsplus.goodwe.com/",
+                         "User-Agent: Mozilla/5.0 (X11; Linux) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+                         h_tok, h_sig, "neutral: 0", "currentLang: en", NULL };
+    if (http_req(url, h, body, NULL, 0, 25, r) != 0) { snprintf(msg, msgn, "curl ontbreekt"); return 0; }
+    if (r->code == 0) { snprintf(msg, msgn, "SEMS+ niet bereikbaar (%s)", curl_why(r->curl)); return 0; }
+    if (r->code != 200) { snprintf(msg, msgn, "SEMS+: HTTP %d", r->code); return 0; }
+    if (!gw_ok(r->body)) {
+        char c[16] = "", m[120] = "";
+        mj_str(r->body, "code", c, sizeof c);
+        mj_str(r->body, "msg", m, sizeof m);
+        if (!m[0]) mj_str(r->body, "message", m, sizeof m);
+        snprintf(msg, msgn, "SEMS+ weigert (%s%s%s)", c, m[0] ? ": " : "", m);
+        return 0;
+    }
+    return 1;
+}
+
+static int poll_goodwe(inv_reading_t * rd, char * msg, size_t msgn) {
+    if (!g_conf.gw_user[0] || !g_conf.gw_pass[0]) {
+        snprintf(msg, msgn, "vul e-mail en wachtwoord van je SEMS+-account in");
+        return 0;
+    }
+    /* login: pwd = base64 of the lowercase hex MD5 of the password */
+    uint8_t md[16];
+    char mdhex[33], pwd[64], body[600], eu[300], ep[200];
+    inv_md5(g_conf.gw_pass, strlen(g_conf.gw_pass), md);
+    for (int i = 0; i < 16; i++) snprintf(mdhex + 2 * i, 3, "%02x", md[i]);
+    inv_b64((const uint8_t *)mdhex, 32, pwd);
+    json_esc(g_conf.gw_user, eu, sizeof eu);
+    json_esc(pwd, ep, sizeof ep);
+    snprintf(body, sizeof body, "{\"account\":\"%s\",\"pwd\":\"%s\",\"agreement\":1,\"isChinese\":false,\"isLocal\":false}", eu, ep);
+    resp_t r;
+    if (!gw_call(gw_login_url(), body, "", "", "", &r, msg, msgn)) {
+        if (strstr(msg, "weigert")) logf_("GoodWe login: %.200s", r.body ? r.body : "");
+        resp_free(&r);
+        return 0;
+    }
+    char uid[96] = "", tok[512] = "", ts[32] = "";
+    mj_str(r.body, "data.uid", uid, sizeof uid);
+    mj_str(r.body, "data.token", tok, sizeof tok);
+    mj_str(r.body, "data.timestamp", ts, sizeof ts);
+    resp_free(&r);
+    if (!uid[0] || !tok[0]) { snprintf(msg, msgn, "SEMS+: login zonder token"); return 0; }
+
+    char url[400];
+    if (!g_gw_station_id[0]) {
+        snprintf(url, sizeof url, "%s/stations/simple-query", gw_api());
+        if (!gw_call(url, "{\"pageIndex\":1,\"pageSize\":20}", uid, ts, tok, &r, msg, msgn)) {
+            resp_free(&r); return 0;
+        }
+        char first[64] = "";
+        for (int i = 0; i < 20; i++) {
+            char p[48], id[64] = "", nm[96] = "";
+            snprintf(p, sizeof p, "data.dataList[%d]", i);
+            const char * st = mj_find(r.body, p, NULL);
+            if (!st) break;
+            mj_str(st, "id", id, sizeof id);
+            mj_str(st, "stationName", nm, sizeof nm);
+            if (!first[0]) snprintf(first, sizeof first, "%s", id);
+            if (g_conf.gw_station[0] && !strcmp(nm, g_conf.gw_station)) { snprintf(g_gw_station_id, sizeof g_gw_station_id, "%s", id); break; }
+        }
+        resp_free(&r);
+        if (!g_gw_station_id[0]) {
+            if (!first[0]) { snprintf(msg, msgn, "SEMS+: geen installatie op dit account"); return 0; }
+            if (g_conf.gw_station[0]) logf_("GoodWe: no installation named '%s', using the first one", g_conf.gw_station);
+            snprintf(g_gw_station_id, sizeof g_gw_station_id, "%s", first);
+        }
+        logf_("GoodWe: installation %s", g_gw_station_id);
+    }
+    if (!g_gw_sn[0]) {
+        snprintf(url, sizeof url, "%s/stations/device/all-status?stationId=%s", gw_api(), g_gw_station_id);
+        if (!gw_call(url, NULL, uid, ts, tok, &r, msg, msgn)) { resp_free(&r); return 0; }
+        /* an INVERTER group first, else any group with a device */
+        for (int pass = 0; pass < 2 && !g_gw_sn[0]; pass++)
+            for (int g = 0; g < 16 && !g_gw_sn[0]; g++) {
+                char p[64], ty[32] = "";
+                snprintf(p, sizeof p, "data.deviceDetailList[%d]", g);
+                const char * grp = mj_find(r.body, p, NULL);
+                if (!grp) break;
+                mj_str(grp, "deviceType", ty, sizeof ty);
+                if (pass == 0 && strcmp(ty, "INVERTER")) continue;
+                for (int st = 0; st < 8 && !g_gw_sn[0]; st++) {
+                    char sp[48], sn[64] = "";
+                    snprintf(sp, sizeof sp, "statusDetailList[%d].snList[0]", st);
+                    if (mj_str(grp, sp, sn, sizeof sn) && sn[0]) {
+                        snprintf(g_gw_sn, sizeof g_gw_sn, "%s", sn);
+                        snprintf(g_gw_type, sizeof g_gw_type, "%s", ty);
+                    }
+                }
+            }
+        resp_free(&r);
+        if (!g_gw_sn[0]) { snprintf(msg, msgn, "SEMS+: geen omvormer in de installatie"); return 0; }
+        logf_("GoodWe: device %s (%s)", g_gw_sn, g_gw_type);
+    }
+    double v;
+    snprintf(url, sizeof url, "%s/equipments/%s/telemetry?deviceType=%s&pwId=%s", gw_api(), g_gw_sn, g_gw_type, g_gw_station_id);
+    if (!gw_call(url, NULL, uid, ts, tok, &r, msg, msgn)) { resp_free(&r); return 0; }
+    rd->power_w = gw_factor(r.body, "pAc", &v) ? v * 1000.0 : 0;
+    resp_free(&r);
+    /* one "groups" value per call: combined today + lifetime is refused (A0400) */
+    snprintf(url, sizeof url, "%s/equipments/%s/telecounting?deviceType=%s&pwId=%s&groups=telecounting_today",
+             gw_api(), g_gw_sn, g_gw_type, g_gw_station_id);
+    if (gw_call(url, NULL, uid, ts, tok, &r, msg, msgn) && gw_factor(r.body, "proPvStatsToday", &v)) rd->today_wh = v * 1000.0;
+    resp_free(&r);
+    msg[0] = 0;
+    snprintf(url, sizeof url, "%s/equipments/%s/telecounting?deviceType=%s&pwId=%s&groups=telecounting_lifetime",
+             gw_api(), g_gw_sn, g_gw_type, g_gw_station_id);
+    if (gw_call(url, NULL, uid, ts, tok, &r, msg, msgn) && gw_factor(r.body, "proPvStatsTotal", &v)) rd->total_wh = v * 1000.0;
+    resp_free(&r);
+    msg[0] = 0;
+    return 1;
+}
+
 /* ------------------------------------------------ SunSpec / Modbus TCP */
 /* Generic SunSpec reader: find the "SunS" marker (40000, 50000 or 0), walk
  * the model chain to the inverter model (101-103 integer + scale factor,
@@ -1357,6 +1547,7 @@ int main(int argc, char ** argv) {
             g_inv_age_logged = -1;
             g_pj_ever = 0;
             g_frz_since = 0;
+            g_gw_station_id[0] = g_gw_sn[0] = g_gw_type[0] = 0;
             last_ok = -1;
             zero_polls = 0;
         }
@@ -1375,6 +1566,7 @@ int main(int argc, char ** argv) {
         else if (mbp)                       ok = poll_mbprofile(mbp, &rd, msg, sizeof msg);
         else if (!strcmp(t, "soliscloud")) { cloud = 1; ok = poll_soliscloud(&rd, msg, sizeof msg); }
         else if (!strcmp(t, "solaredge_cloud")) { cloud = 1; ok = poll_solaredge(&rd, msg, sizeof msg); }
+        else if (!strcmp(t, "goodwe_sems")) { cloud = 2; ok = poll_goodwe(&rd, msg, sizeof msg); }
         else snprintf(msg, sizeof msg, "onbekend type '%s'", t);
 
         report(ok, &rd, ok ? "" : msg);
@@ -1391,6 +1583,7 @@ int main(int argc, char ** argv) {
         zero_polls = (ok && rd.power_w > 0) ? 0 : zero_polls + 1;
         int wait = g_conf.interval;
         if (cloud && wait < 120) wait = 120;
+        if (cloud == 2 && wait < 300) wait = 300;    /* SEMS+ refreshes every ~5 min */
         if (zero_polls > 10 && wait < 120) wait = 120;
         if (!t[0]) wait = 15;     /* pick up new settings quickly */
         for (int i = 0; i < wait && !g_stop; i++) {

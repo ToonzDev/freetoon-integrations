@@ -1,7 +1,7 @@
 {
   "id": "inverters",
   "name": "Omvormers",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "binary": "freetoon-app-inverters",
   "args": [],
   "service_id": "inverters",
@@ -26,6 +26,7 @@
           { "value": "solis_local", "label": "Solis / Ginlong wifi-stick (lokaal)" },
           { "value": "soliscloud", "label": "SolisCloud (cloud, API-sleutel)" },
           { "value": "solaredge_cloud", "label": "SolarEdge (cloud, client-ID en secret)" },
+          { "value": "goodwe_sems", "label": "GoodWe (SEMS+ portal, e-mail en wachtwoord)" },
           { "value": "omnik", "label": "Omnik wifi-stick (lokaal)" },
           { "value": "sunspec", "label": "SunSpec via Modbus TCP (SolarEdge, SMA, Fronius, Kostal, ...)" },
           { "value": "huawei", "label": "Huawei SUN2000 (Modbus TCP)" },
@@ -59,12 +60,17 @@
         "help": "Eerst opslaan. Log daarna bij SolarEdge in en geef toestemming. Met http://localhost meldt de browser daarna dat de pagina niet bereikbaar is: dat klopt, kopieer dan het hele adres (met code=) naar het veld hieronder. De koppeling geldt 24 maanden; SolarEdge ververst ongeveer elk kwartier, 15-30 min vertraagd." },
       { "key": "SE_AUTH", "label": "Adres na het goedkeuren", "type": "text", "show": "TYPE=solaredge_cloud",
         "help": "Na het goedkeuren: plak hier het hele adres uit de adresbalk (http://localhost/?code=...&site_id=...) en sla meteen op; de code is eenmalig en kort geldig. Mislukt het, klik dan opnieuw op Koppelen." },
+      { "key": "GW_USER", "label": "SEMS+ e-mail", "type": "text", "show": "TYPE=goodwe_sems", "guards": "GW_PASS",
+        "help": "Het account waarmee je inlogt op semsplus.goodwe.com (de SEMS+-app). GoodWe heeft het oude SEMS-portaal in september 2026 gesloten. De gegevens ververst SEMS+ ongeveer elke 5 minuten." },
+      { "key": "GW_PASS", "label": "SEMS+ wachtwoord", "type": "secret", "show": "TYPE=goodwe_sems" },
+      { "key": "GW_STATION", "label": "Naam van de installatie (optioneel)", "type": "text", "show": "TYPE=goodwe_sems",
+        "help": "Alleen nodig als er meer installaties op je account staan: de naam zoals in SEMS+. Leeg = de eerste." },
       { "key": "MB_PORT", "label": "Modbus-poort", "type": "text", "default": "502", "show": "TYPE=sunspec|huawei|sungrow|growatt|solis_modbus",
         "help": "Zet Modbus TCP aan op de omvormer of de dongle. Meestal: SolarEdge 1502 (aanzetten via SetApp of het display; betrouwbaar via een netwerkkabel, via wifi alleen op sommige firmware), SMA 502, Fronius 502 (Modbus TCP op 'int + SF' of 'float'), Kostal 1502, Huawei 502 via de SDongle (Modbus TCP op 'onbeperkt' in FusionSolar) of 6607 via de eigen wifi van de omvormer, Sungrow 502 (WiNet-S: Modbus aan en geen whitelist), Growatt en Solis: de poort van je RS485-TCP-gateway (bijv. Elfin EW11, ingesteld op Modbus TCP naar RTU)." },
       { "key": "MB_UNIT", "label": "Modbus unit-id", "type": "text", "default": "1", "show": "TYPE=sunspec|huawei|sungrow|growatt|solis_modbus",
         "help": "Meestal 1 (SolarEdge, Fronius, Huawei via SDongle, Sungrow, Growatt, Solis); SMA 126, Kostal 71, Huawei via de eigen wifi van de omvormer 0." }
     ]
   },
-  "description": "Leest je omvormer uit (Enphase, Solis, Omnik, SolarEdge-cloud, of SunSpec via Modbus TCP: SolarEdge, SMA, Fronius, Kostal) voor de Zon-tegel, het dimscherm en de statistieken.",
+  "description": "Leest je omvormer uit (Enphase, Solis, Omnik, SolarEdge-cloud, GoodWe SEMS+, of SunSpec via Modbus TCP: SolarEdge, SMA, Fronius, Kostal) voor de Zon-tegel, het dimscherm en de statistieken.",
   "license": "MIT"
 }
