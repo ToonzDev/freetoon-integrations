@@ -65,8 +65,8 @@ typedef struct {
     char solis_api[128];
     char mb_port[8];          /* sunspec: Modbus TCP port */
     char mb_unit[8];          /* sunspec: Modbus unit id */
-    char se_client_id[128];   /* solaredge_cloud: Site Access app (developer.solaredge.com) */
-    char se_client_secret[128];
+    char se_client_id[512];   /* solaredge_cloud: Site Access app (developer.solaredge.com) */
+    char se_client_secret[512];   /* was 128: a longer secret was cut off silently */
     char se_redirect[256];    /* the Redirect URI registered with that app */
     char gw_user[128];        /* goodwe_sems: SEMS+ account (e-mail) */
     char gw_pass[128];
@@ -876,7 +876,7 @@ static int poll_soliscloud(inv_reading_t * rd, char * msg, size_t msgn) {
 #define SE_STATE "solaredge.state"
 
 typedef struct {
-    char   client[128];          /* tokens belong to this client id */
+    char   client[512];          /* tokens belong to this client id */
     char   refresh[2048];
     char   access[4096];
     time_t exp;
@@ -982,8 +982,8 @@ static void trim_copy(const char * s, char * out, size_t n) {
  * client_secret_basic), 2 form body with client_id/secret. */
 static int se_token(const char * grant, const char * value, int with_redirect, int style,
                     char * msg, size_t msgn, int * http, int * bad_client) {
-    static char body[4600];
-    char id[130], sec[130], ci[400], cs[400], rd[520], up[270];
+    static char body[6000];
+    char id[512], sec[512], ci[1600], cs[1600], rd[520], up[1030];
     static char ev[2200];
     trim_copy(g_conf.se_client_id, id, sizeof id);
     trim_copy(g_conf.se_client_secret, sec, sizeof sec);
@@ -1049,6 +1049,8 @@ static int se_token(const char * grant, const char * value, int with_redirect, i
         else
             snprintf(msg, msgn, "SolarEdge weigert (HTTP %d%s%s%s%s)", r.code, e[0] ? ", " : "", e, d[0] ? ": " : "", d);
         logf_("SolarEdge token (%s, style %d): HTTP %d %.200s", grant, style, r.code, r.body ? r.body : "");
+        if (*bad_client && style == 0)    /* lengths only, never the values: a cut-off or doubled paste shows */
+            logf_("SolarEdge: client-ID %u tekens, secret %u tekens (na trimmen)", (unsigned)strlen(id), (unsigned)strlen(sec));
     }
     resp_free(&r);
     return ok;
