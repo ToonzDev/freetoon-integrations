@@ -1,0 +1,19 @@
+{
+  "schema": "nl.toon.matter-bridge/status-v1",
+  "running": true,
+  "commissioned": false,
+  "message": "1 apparaat via Matter gedeeld",
+  "pairing_code": "34970112332",
+  "qr_payload": "MT:Y.K9042C00KA0648G00",
+  "qr_image": "file:///qmf/qml/apps/matterbridge/drawables/MatterPairingQr.png",
+  "selected_count": 1,
+  "energy": {
+    "available": true,
+    "online": true,
+    "import_power_w": 271,
+    "export_power_w": 0,
+    "net_power_w": 271,
+    "gas_flow_lph": 0
+  },
+  "updated_at": "2026-01-01T12:00:00.000Z"
+}
