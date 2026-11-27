@@ -71,6 +71,12 @@ typedef struct {
     char gw_user[128];        /* goodwe_sems: SEMS+ account (e-mail) */
     char gw_pass[128];
     char gw_station[96];      /* installation name; "" = the first one */
+    char sma_pass[64];        /* sma_web: the "User" password of the SMA web interface */
+    char dz_idx[48];          /* domoticz: device idx, or two as "12+19" */
+    char pvo_key[96];         /* pvoutput: API key */
+    char pvo_sid[24];         /* pvoutput: system id */
+    char solax_token[96];     /* solax_cloud: token id */
+    char solax_sn[48];        /* solax_cloud: registration number of the wifi dongle */
     char se_auth[1200];       /* fallback: the address SolarEdge sent the browser to (code=...) */
     int  interval;            /* s */
 } conf_t;
@@ -105,6 +111,8 @@ static void set_field(conf_t * c, const char * k, const char * v) {
     S("SE_CLIENT_ID", se_client_id) S("SE_CLIENT_SECRET", se_client_secret)
     S("SE_REDIRECT", se_redirect) S("SE_AUTH", se_auth)
     S("GW_USER", gw_user) S("GW_PASS", gw_pass) S("GW_STATION", gw_station)
+    S("SMA_PASS", sma_pass) S("DZ_IDX", dz_idx) S("PVO_KEY", pvo_key) S("PVO_SID", pvo_sid)
+    S("SOLAX_TOKEN", solax_token) S("SOLAX_SN", solax_sn)
 #undef S
     if (!strcmp(k, "INTERVAL")) c->interval = atoi(v);
 }
@@ -335,6 +343,12 @@ static const char * brand_name(void) {
     if (mp) return mp->brand;
     if (!strcmp(g_conf.type, "solaredge_cloud")) return "SolarEdge cloud";
     if (!strcmp(g_conf.type, "goodwe_sems")) return "GoodWe SEMS+";
+    static const char * const names[][2] = {
+        { "fronius", "Fronius" }, { "kostal_piko", "Kostal Piko" }, { "zeversolar", "ZeverSolar" },
+        { "opendtu", "openDTU" }, { "saj_local", "SAJ" }, { "fp4all", "FP4ALL" }, { "sma_web", "SMA" },
+        { "domoticz", "Domoticz" }, { "pvoutput", "PVOutput" }, { "solax_cloud", "SolaxCloud" } };
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
+        if (!strcmp(g_conf.type, names[i][0])) return names[i][1];
     if (strcmp(g_conf.type, "sunspec") || !g_ss_mfr[0]) return g_conf.type;
     size_t o = 0;
     for (const char * p = g_ss_mfr; *p && o + 1 < sizeof b; p++)
@@ -1356,6 +1370,330 @@ static int poll_goodwe(inv_reading_t * rd, char * msg, size_t msgn) {
     return 1;
 }
 
+/* ------------------------------------- solarPanel app plugins (local) */
+/* Ported from ToonSoftwareCollective/solarpanel-plugins (oepi-loepi and
+ * contributors): the same requests and fields, one GET (or two) per poll. */
+
+/* Number after the n-th (1-based) occurrence of mark; 0 when missing. */
+static double num_after(const char * body, const char * mark, int n) {
+    const char * p = body;
+    for (int i = 0; i < n; i++) {
+        p = strstr(p, mark);
+        if (!p) return 0;
+        p += strlen(mark);
+    }
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    char * e;
+    double v = strtod(p, &e);
+    return e == p ? 0 : v;
+}
+/* Number inside <tag>...</tag>; -1 when the tag is missing. */
+static double xml_num(const char * body, const char * tag) {
+    char open[48];
+    snprintf(open, sizeof open, "<%s>", tag);
+    const char * p = strstr(body, open);
+    if (!p) return -1;
+    return strtod(p + strlen(open), NULL);
+}
+/* GET http://<host><path> (no TLS); 1 = 200 with a body. */
+static int local_get(const char * path, const char * userpass, resp_t * r, char * msg, size_t msgn) {
+    char url[300];
+    snprintf(url, sizeof url, "http://%s%s", g_conf.host, path);
+    if (http_req(url, NULL, NULL, userpass, 0, 15, r) != 0) { snprintf(msg, msgn, "curl ontbreekt"); return 0; }
+    if (r->code == 0) { snprintf(msg, msgn, "geen verbinding met %s (%s)", g_conf.host, curl_why(r->curl)); return 0; }
+    if (r->code != 200) { snprintf(msg, msgn, "%s: HTTP %d", g_conf.host, r->code); return 0; }
+    return 1;
+}
+
+/* Fronius Solar API v1 (FRONIUS1): PAC (W) only while StatusCode 7 (running). */
+static int poll_fronius(inv_reading_t * rd, char * msg, size_t msgn) {
+    resp_t r;
+    int ok = local_get("/solar_api/v1/GetInverterRealtimeData.cgi?Scope=Device&DeviceID=1&DataCollection=CommonInverterData",
+                       NULL, &r, msg, msgn);
+    if (ok) {
+        double code = -1, st = 0, v;
+        mj_num(r.body, "Head.Status.Code", &code);
+        if (code != 0) { snprintf(msg, msgn, "Fronius meldt status %.0f", code); ok = 0; }
+        else {
+            mj_num(r.body, "Body.Data.DeviceStatus.StatusCode", &st);
+            rd->power_w = (st == 7 && mj_num(r.body, "Body.Data.PAC.Value", &v)) ? v : 0;
+            if (mj_num(r.body, "Body.Data.TOTAL_ENERGY.Value", &v)) rd->total_wh = v;
+            if (mj_num(r.body, "Body.Data.DAY_ENERGY.Value", &v)) rd->today_wh = v;
+        }
+    }
+    resp_free(&r);
+    return ok;
+}
+/* Kostal Piko web page (KOSTAL1): values after 'bgcolor="#FFFFFF">':
+ * 1 = power W, 2 = total kWh, 3 = today kWh; login pvserver:pvwr. */
+static int poll_kostal(inv_reading_t * rd, char * msg, size_t msgn) {
+    resp_t r;
+    int ok = local_get("/", "pvserver:pvwr", &r, msg, msgn);
+    if (ok) {
+        const char * m = "bgcolor=\"#FFFFFF\">";
+        if (!strstr(r.body, m)) { snprintf(msg, msgn, "Kostal: onbekende pagina"); ok = 0; }
+        else {
+            rd->power_w  = num_after(r.body, m, 1);
+            rd->total_wh = num_after(r.body, m, 2) * 1000.0;
+            rd->today_wh = num_after(r.body, m, 3) * 1000.0;
+        }
+    }
+    resp_free(&r);
+    return ok;
+}
+/* ZeverSolar home.cgi (ZEVER1): line 11 W, line 12 today kWh, line 13 "OK".
+ * "1.5" means 1.05 kWh (one decimal digit = hundredths). No lifetime total. */
+static int poll_zever(inv_reading_t * rd, char * msg, size_t msgn) {
+    resp_t r;
+    int ok = local_get("/home.cgi", NULL, &r, msg, msgn);
+    if (ok) {
+        char * line[16] = { 0 };
+        int n = 0;
+        for (char * p = r.body; p && n < 16; ) {
+            line[n++] = p;
+            char * nl = strchr(p, '\n');
+            if (nl) { *nl = 0; if (nl > p && nl[-1] == '\r') nl[-1] = 0; p = nl + 1; } else p = NULL;
+        }
+        if (n < 13) { snprintf(msg, msgn, "ZeverSolar: onbekend antwoord"); ok = 0; }
+        else if (strncmp(line[12], "OK", 2)) { rd->power_w = 0; rd->today_wh = -1; }   /* asleep / no grid */
+        else {
+            rd->power_w = atof(line[10]);
+            const char * t = line[11];
+            const char * dot = strchr(t, '.');
+            double kwh = atof(t);
+            if (dot && strlen(dot + 1) == 1) kwh = atoi(t) + atoi(dot + 1) / 100.0;
+            rd->today_wh = kwh * 1000.0;
+        }
+    }
+    resp_free(&r);
+    return ok;
+}
+/* openDTU (OPENDTU1): total.Power.v W, YieldDay.v Wh, YieldTotal.v kWh. */
+static int poll_opendtu(inv_reading_t * rd, char * msg, size_t msgn) {
+    resp_t r;
+    int ok = local_get("/api/livedata/status", NULL, &r, msg, msgn);
+    if (ok) {
+        double v;
+        if (!mj_num(r.body, "total.Power.v", &v)) { snprintf(msg, msgn, "openDTU: geen total.Power in het antwoord"); ok = 0; }
+        else {
+            rd->power_w = v;
+            if (mj_num(r.body, "total.YieldDay.v", &v)) rd->today_wh = v;
+            if (mj_num(r.body, "total.YieldTotal.v", &v)) rd->total_wh = v * 1000.0;
+        }
+    }
+    resp_free(&r);
+    return ok;
+}
+/* SAJ local real_time_data.xml (SAJ1): p-ac W, e-today / e-total kWh. */
+static int poll_saj(inv_reading_t * rd, char * msg, size_t msgn) {
+    resp_t r;
+    int ok = local_get("/real_time_data.xml", NULL, &r, msg, msgn);
+    if (ok) {
+        double p = xml_num(r.body, "p-ac"), d = xml_num(r.body, "e-today"), t = xml_num(r.body, "e-total");
+        if (p < 0) { snprintf(msg, msgn, "SAJ: geen p-ac in het antwoord"); ok = 0; }
+        else {
+            rd->power_w = p;
+            if (d >= 0) rd->today_wh = d * 1000.0;
+            if (t >= 0) rd->total_wh = t * 1000.0;
+        }
+    }
+    resp_free(&r);
+    return ok;
+}
+/* FP4ALL datalogger status.xml (FP4ALL): gauge_power W, energy_today /
+ * energy_total as the plugin uses them (Wh). */
+static int poll_fp4all(inv_reading_t * rd, char * msg, size_t msgn) {
+    resp_t r;
+    int ok = local_get("/status.xml", NULL, &r, msg, msgn);
+    if (ok) {
+        double p = xml_num(r.body, "gauge_power"), d = xml_num(r.body, "energy_today"), t = xml_num(r.body, "energy_total");
+        if (p < 0) { snprintf(msg, msgn, "FP4ALL: geen gauge_power in het antwoord"); ok = 0; }
+        else {
+            rd->power_w = p;
+            if (d >= 0) rd->today_wh = d;
+            if (t >= 0) rd->total_wh = t;
+        }
+    }
+    resp_free(&r);
+    return ok;
+}
+/* SMA webconnect (SMA1 http / SMA3 https): login as "usr" for a sid, then
+ * getValues 6100_40263F00 (W), 6400_00262200 (today Wh), 6400_00260100
+ * (total Wh). An SMA allows only a few sessions: the sid is kept and only
+ * renewed when refused (the plugin logged in on every poll). */
+static char g_sma_sid[64];
+static int  g_sma_https = -1;           /* -1 unknown, 0 http, 1 https (self-signed) */
+static int sma_post(const char * path, const char * body, resp_t * r) {
+    char url[300];
+    snprintf(url, sizeof url, "%s://%s%s", g_sma_https ? "https" : "http", g_conf.host, path);
+    const char * h[] = { "Accept: application/json, text/plain, */*", "Content-Type: application/json;charset=UTF-8", NULL };
+    return http_req(url, h, body, NULL, g_sma_https ? 1 : 0, 15, r);
+}
+static int sma_val(const char * body, const char * key, double * v) {
+    /* result.<device id>.<key>["1"][0].val, the device id is the first key of result */
+    const char * res = mj_find(body, "result", NULL);
+    if (!res || *res != '{') return 0;
+    const char * q = strchr(res, '"');
+    if (!q) return 0;
+    const char * qe = strchr(q + 1, '"');
+    if (!qe || qe - q - 1 >= 48) return 0;
+    char path[128], dev[48];
+    memcpy(dev, q + 1, (size_t)(qe - q - 1));
+    dev[qe - q - 1] = 0;
+    snprintf(path, sizeof path, "%s.%s.1[0].val", dev, key);
+    const char * vp = mj_find(res, path, NULL);
+    if (!vp || *vp == 'n') return 0;
+    return mj_num(res, path, v);
+}
+static int poll_sma(inv_reading_t * rd, char * msg, size_t msgn) {
+    if (!g_conf.sma_pass[0]) { snprintf(msg, msgn, "vul het wachtwoord (gebruiker) van de SMA in"); return 0; }
+    resp_t r;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        if (!g_sma_sid[0]) {
+            char ep[160], body[220];
+            json_esc(g_conf.sma_pass, ep, sizeof ep);
+            snprintf(body, sizeof body, "{\"pass\":\"%s\",\"right\":\"usr\"}", ep);
+            int tries[2] = { g_sma_https < 0 ? 1 : g_sma_https, 0 };     /* unknown: https first, then http */
+            int n = g_sma_https < 0 ? 2 : 1, got = 0;
+            for (int i = 0; i < n && !got; i++) {
+                g_sma_https = tries[i];
+                if (sma_post("/dyn/login.json", body, &r) != 0) { snprintf(msg, msgn, "curl ontbreekt"); return 0; }
+                if (r.code == 200 && mj_str(r.body, "result.sid", g_sma_sid, sizeof g_sma_sid) && g_sma_sid[0] && strcmp(g_sma_sid, "null"))
+                    got = 1;
+                else if (r.code == 200) {
+                    double err = 0;
+                    mj_num(r.body, "err", &err);
+                    snprintf(msg, msgn, err ? "SMA weigert de login (fout %.0f: wachtwoord? te veel sessies?)" : "SMA: login zonder sessie", err);
+                    g_sma_sid[0] = 0;
+                    resp_free(&r);
+                    return 0;
+                }
+                resp_free(&r);
+            }
+            if (!got) { g_sma_https = -1; snprintf(msg, msgn, "geen verbinding met SMA %s", g_conf.host); return 0; }
+            logf_("SMA: logged in via %s", g_sma_https ? "https" : "http");
+        }
+        char path[128];
+        snprintf(path, sizeof path, "/dyn/getValues.json?sid=%s", g_sma_sid);
+        if (sma_post(path, "{\"destDev\":[],\"keys\":[\"6400_00260100\",\"6400_00262200\",\"6100_40263F00\"]}", &r) != 0) {
+            snprintf(msg, msgn, "curl ontbreekt"); return 0;
+        }
+        if (r.code == 200 && mj_find(r.body, "result", NULL)) {
+            double v;
+            rd->power_w = sma_val(r.body, "6100_40263F00", &v) ? v : 0;     /* null at night */
+            if (sma_val(r.body, "6400_00262200", &v)) rd->today_wh = v;
+            if (sma_val(r.body, "6400_00260100", &v)) rd->total_wh = v;
+            resp_free(&r);
+            return 1;
+        }
+        resp_free(&r);
+        g_sma_sid[0] = 0;                                    /* session gone: log in again */
+    }
+    snprintf(msg, msgn, "SMA: geen waarden (sessie verlopen?)");
+    return 0;
+}
+/* Domoticz (DOM-DOUBLE1/2): one idx or two ("12+19") added up; Usage W,
+ * CounterToday / Data kWh. New API (2023.2+) first, then the old one. */
+static int dz_one(const char * idx, double * w, double * today, double * total, char * msg, size_t msgn) {
+    static const char * const paths[2] = { "/json.htm?type=command&param=getdevices&rid=%s", "/json.htm?type=devices&rid=%s" };
+    for (int k = 0; k < 2; k++) {
+        char path[96];
+        snprintf(path, sizeof path, paths[k], idx);
+        resp_t r;
+        int ok = local_get(path, NULL, &r, msg, msgn);
+        if (ok && mj_find(r.body, "result[0]", NULL)) {
+            char u[48] = "", ct[48] = "", d[48] = "";
+            mj_str(r.body, "result[0].Usage", u, sizeof u);
+            mj_str(r.body, "result[0].CounterToday", ct, sizeof ct);
+            mj_str(r.body, "result[0].Data", d, sizeof d);
+            *w += atof(u);
+            *today += atof(ct) * 1000.0;
+            *total += atof(d) * 1000.0;
+            resp_free(&r);
+            return 1;
+        }
+        resp_free(&r);
+        if (!ok && strstr(msg, "geen verbinding")) return 0;
+    }
+    snprintf(msg, msgn, "Domoticz: apparaat idx %s niet gevonden", idx);
+    return 0;
+}
+static int poll_domoticz(inv_reading_t * rd, char * msg, size_t msgn) {
+    if (!g_conf.dz_idx[0]) { snprintf(msg, msgn, "vul de IDX van het zonne-apparaat in Domoticz in"); return 0; }
+    char a[24] = "", b[24] = "";
+    const char * plus = strchr(g_conf.dz_idx, '+');
+    snprintf(a, sizeof a, "%.*s", plus ? (int)(plus - g_conf.dz_idx) : (int)strlen(g_conf.dz_idx), g_conf.dz_idx);
+    if (plus) snprintf(b, sizeof b, "%s", plus + 1);
+    for (char * c = a; *c; c++) if (!isdigit((unsigned char)*c)) { *c = 0; break; }
+    for (char * c = b; *c; c++) if (!isdigit((unsigned char)*c)) { *c = 0; break; }
+    double w = 0, d = 0, t = 0;
+    if (!a[0] || !dz_one(a, &w, &d, &t, msg, msgn)) return 0;
+    if (b[0] && !dz_one(b, &w, &d, &t, msg, msgn)) return 0;
+    rd->power_w = w; rd->today_wh = d; rd->total_wh = t;
+    return 1;
+}
+
+/* ------------------------------------- solarPanel app plugins (cloud API key) */
+/* PVOutput (PVOUTPUT1): getstatus (fields 0 / 1 as the plugin reads them:
+ * today Wh, power W) + getstatistic (field 0: lifetime Wh). 60 calls an hour
+ * at most: polled every 5 min. */
+static int pvo_csv(const char * path, double * f0, double * f1, char * msg, size_t msgn) {
+    char url[160], hk[140], hs[60];
+    const char * base = getenv("INV_PVO_API");          /* test server (tests only) */
+    snprintf(url, sizeof url, "%s/%s", (base && *base) ? base : "https://pvoutput.org/service/r2", path);
+    snprintf(hk, sizeof hk, "X-Pvoutput-Apikey: %s", g_conf.pvo_key);
+    snprintf(hs, sizeof hs, "X-Pvoutput-SystemId: %s", g_conf.pvo_sid);
+    const char * h[] = { hk, hs, NULL };
+    resp_t r;
+    if (http_req(url, h, "", NULL, 0, 20, &r) != 0) { snprintf(msg, msgn, "curl ontbreekt"); return 0; }
+    int ok = r.code == 200;
+    if (ok) {
+        char * e;
+        *f0 = strtod(r.body, &e);
+        if (f1) *f1 = (*e == ',') ? strtod(e + 1, NULL) : 0;
+    } else if (r.code == 0) snprintf(msg, msgn, "PVOutput niet bereikbaar (%s)", curl_why(r.curl));
+    else snprintf(msg, msgn, "PVOutput: HTTP %d %.60s", r.code, r.body ? r.body : "");
+    resp_free(&r);
+    return ok;
+}
+static int poll_pvoutput(inv_reading_t * rd, char * msg, size_t msgn) {
+    if (!g_conf.pvo_key[0] || !g_conf.pvo_sid[0]) { snprintf(msg, msgn, "vul API-sleutel en systeem-ID van PVOutput in"); return 0; }
+    double a, b, t;
+    if (!pvo_csv("getstatus.jsp?stats=1", &a, &b, msg, msgn)) return 0;
+    rd->today_wh = a; rd->power_w = b;
+    if (pvo_csv("getstatistic.jsp", &t, NULL, msg, msgn)) rd->total_wh = t;
+    msg[0] = 0;
+    return 1;
+}
+/* SolaxCloud (SOLAX1): getRealtimeInfo with tokenId + sn: acpower W,
+ * yieldtoday / yieldtotal kWh. Polled every 5 min. */
+static int poll_solax(inv_reading_t * rd, char * msg, size_t msgn) {
+    if (!g_conf.solax_token[0] || !g_conf.solax_sn[0]) { snprintf(msg, msgn, "vul token-ID en registratienummer van Solax in"); return 0; }
+    char tk[200], sn[100], url[400];
+    url_enc(g_conf.solax_token, tk, sizeof tk);
+    url_enc(g_conf.solax_sn, sn, sizeof sn);
+    const char * base = getenv("INV_SOLAX_API");        /* test server (tests only) */
+    snprintf(url, sizeof url, "%s/getRealtimeInfo.do?tokenId=%s&sn=%s",
+             (base && *base) ? base : "https://www.solaxcloud.com:9443/proxy/api", tk, sn);
+    resp_t r;
+    if (http_req(url, NULL, NULL, NULL, 0, 20, &r) != 0) { snprintf(msg, msgn, "curl ontbreekt"); return 0; }
+    int ok = 0;
+    if (r.code == 200 && mj_bool(r.body, "success")) {
+        double v;
+        rd->power_w = mj_num(r.body, "result.acpower", &v) ? v : 0;
+        if (mj_num(r.body, "result.yieldtoday", &v)) rd->today_wh = v * 1000.0;
+        if (mj_num(r.body, "result.yieldtotal", &v)) rd->total_wh = v * 1000.0;
+        ok = 1;
+    } else if (r.code == 200) {
+        char e[120] = "";
+        mj_str(r.body, "exception", e, sizeof e);
+        snprintf(msg, msgn, "Solax weigert (%s)", e[0] ? e : "token / registratienummer?");
+    } else if (r.code == 0) snprintf(msg, msgn, "SolaxCloud niet bereikbaar (%s)", curl_why(r.curl));
+    else snprintf(msg, msgn, "SolaxCloud: HTTP %d", r.code);
+    resp_free(&r);
+    return ok;
+}
+
 /* ------------------------------------------------ SunSpec / Modbus TCP */
 /* Generic SunSpec reader: find the "SunS" marker (40000, 50000 or 0), walk
  * the model chain to the inverter model (101-103 integer + scale factor,
@@ -1548,6 +1886,7 @@ int main(int argc, char ** argv) {
             g_pj_ever = 0;
             g_frz_since = 0;
             g_gw_station_id[0] = g_gw_sn[0] = g_gw_type[0] = 0;
+            g_sma_sid[0] = 0; g_sma_https = -1;
             last_ok = -1;
             zero_polls = 0;
         }
@@ -1556,7 +1895,9 @@ int main(int argc, char ** argv) {
         int ok = 0, cloud = 0;
         const char * t = g_conf.type;
         const inv_mb_profile_t * mbp = inv_mb_profile(t);
-        int local = !strcmp(t, "enphase") || !strcmp(t, "solis_local") || !strcmp(t, "omnik") || !strcmp(t, "sunspec") || mbp;
+        int local = !strcmp(t, "enphase") || !strcmp(t, "solis_local") || !strcmp(t, "omnik") || !strcmp(t, "sunspec") || mbp
+                 || !strcmp(t, "fronius") || !strcmp(t, "kostal_piko") || !strcmp(t, "zeversolar") || !strcmp(t, "opendtu")
+                 || !strcmp(t, "saj_local") || !strcmp(t, "fp4all") || !strcmp(t, "sma_web") || !strcmp(t, "domoticz");
         if (!t[0]) snprintf(msg, sizeof msg, "geen omvormer ingesteld");
         else if (local && !host_ok(g_conf.host)) snprintf(msg, sizeof msg, "vul het IP-adres in");
         else if (!strcmp(t, "enphase"))     ok = poll_enphase(&rd, msg, sizeof msg);
@@ -1567,6 +1908,16 @@ int main(int argc, char ** argv) {
         else if (!strcmp(t, "soliscloud")) { cloud = 1; ok = poll_soliscloud(&rd, msg, sizeof msg); }
         else if (!strcmp(t, "solaredge_cloud")) { cloud = 1; ok = poll_solaredge(&rd, msg, sizeof msg); }
         else if (!strcmp(t, "goodwe_sems")) { cloud = 2; ok = poll_goodwe(&rd, msg, sizeof msg); }
+        else if (!strcmp(t, "fronius"))     ok = poll_fronius(&rd, msg, sizeof msg);
+        else if (!strcmp(t, "kostal_piko")) ok = poll_kostal(&rd, msg, sizeof msg);
+        else if (!strcmp(t, "zeversolar"))  ok = poll_zever(&rd, msg, sizeof msg);
+        else if (!strcmp(t, "opendtu"))     ok = poll_opendtu(&rd, msg, sizeof msg);
+        else if (!strcmp(t, "saj_local"))   ok = poll_saj(&rd, msg, sizeof msg);
+        else if (!strcmp(t, "fp4all"))      ok = poll_fp4all(&rd, msg, sizeof msg);
+        else if (!strcmp(t, "sma_web"))     ok = poll_sma(&rd, msg, sizeof msg);
+        else if (!strcmp(t, "domoticz"))    ok = poll_domoticz(&rd, msg, sizeof msg);
+        else if (!strcmp(t, "pvoutput"))    { cloud = 2; ok = poll_pvoutput(&rd, msg, sizeof msg); }
+        else if (!strcmp(t, "solax_cloud")) { cloud = 2; ok = poll_solax(&rd, msg, sizeof msg); }
         else snprintf(msg, sizeof msg, "onbekend type '%s'", t);
 
         report(ok, &rd, ok ? "" : msg);
