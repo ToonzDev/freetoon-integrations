@@ -77,6 +77,13 @@ typedef struct {
     char pvo_sid[24];         /* pvoutput: system id */
     char solax_token[96];     /* solax_cloud: token id */
     char solax_sn[48];        /* solax_cloud: registration number of the wifi dongle */
+    char grow_user[128];      /* growatt_cloud: ShinePhone / server.growatt.com account */
+    char grow_pass[96];
+    char hoy_user[128];       /* hoymiles_cloud: S-Miles Cloud account */
+    char hoy_pass[96];
+    char hoy_sid[24];         /* hoymiles_cloud: station id (in the portal url) */
+    char fs_user[128];        /* fusionsolar: Huawei FusionSolar account */
+    char fs_pass[96];
     char se_auth[1200];       /* fallback: the address SolarEdge sent the browser to (code=...) */
     int  interval;            /* s */
 } conf_t;
@@ -113,6 +120,9 @@ static void set_field(conf_t * c, const char * k, const char * v) {
     S("GW_USER", gw_user) S("GW_PASS", gw_pass) S("GW_STATION", gw_station)
     S("SMA_PASS", sma_pass) S("DZ_IDX", dz_idx) S("PVO_KEY", pvo_key) S("PVO_SID", pvo_sid)
     S("SOLAX_TOKEN", solax_token) S("SOLAX_SN", solax_sn)
+    S("GROW_USER", grow_user) S("GROW_PASS", grow_pass)
+    S("HOY_USER", hoy_user) S("HOY_PASS", hoy_pass) S("HOY_SID", hoy_sid)
+    S("FS_USER", fs_user) S("FS_PASS", fs_pass)
 #undef S
     if (!strcmp(k, "INTERVAL")) c->interval = atoi(v);
 }
@@ -204,6 +214,7 @@ static const char * tmp_dir(void) {
  * request body (POST) or NULL (GET). userpass: "user:pass" for basic auth or
  * NULL. insecure: skip TLS verification (only for the Envoy's self-signed
  * certificate on the LAN). Returns 0 when curl ran; r->code says the rest. */
+static const char * g_jar;      /* cookie file for portal logins (Growatt, FusionSolar), else NULL */
 static int http_req(const char * url, const char * const * headers, const char * data,
                     const char * userpass, int insecure, int timeout, resp_t * r) {
     memset(r, 0, sizeof *r);
@@ -220,6 +231,7 @@ static int http_req(const char * url, const char * const * headers, const char *
     if (insecure) fputs("insecure\n", f);
     for (int i = 0; headers && headers[i]; i++) cfg_q(f, "header", headers[i]);
     if (userpass) cfg_q(f, "user", userpass);
+    if (g_jar) { cfg_q(f, "cookie", g_jar); cfg_q(f, "cookie-jar", g_jar); }
     if (data) {
         /* data-binary would read a file for a leading '@'; our bodies never start with one */
         cfg_q(f, "data-binary", data[0] == '@' ? "" : data);
@@ -346,7 +358,8 @@ static const char * brand_name(void) {
     static const char * const names[][2] = {
         { "fronius", "Fronius" }, { "kostal_piko", "Kostal Piko" }, { "zeversolar", "ZeverSolar" },
         { "opendtu", "openDTU" }, { "saj_local", "SAJ" }, { "fp4all", "FP4ALL" }, { "sma_web", "SMA" },
-        { "domoticz", "Domoticz" }, { "pvoutput", "PVOutput" }, { "solax_cloud", "SolaxCloud" } };
+        { "domoticz", "Domoticz" }, { "pvoutput", "PVOutput" }, { "solax_cloud", "SolaxCloud" },
+        { "growatt_cloud", "Growatt" }, { "hoymiles_cloud", "Hoymiles" }, { "fusionsolar", "Huawei FusionSolar" } };
     for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
         if (!strcmp(g_conf.type, names[i][0])) return names[i][1];
     if (strcmp(g_conf.type, "sunspec") || !g_ss_mfr[0]) return g_conf.type;
@@ -1694,6 +1707,310 @@ static int poll_solax(inv_reading_t * rd, char * msg, size_t msgn) {
     return ok;
 }
 
+/* ------------------------------------- solarPanel app plugins (portal login) */
+/* Growatt, Hoymiles and Huawei FusionSolar: the same requests as the
+ * solarPanel plugins (GROW1, HOY1, HUAWEI-T1 + solarPanel.sh). These log in
+ * with the user's portal account, so a refused login is not retried for an
+ * hour (or until the settings are saved): portals lock an account after a
+ * few wrong passwords. Polled every 5 min. */
+static time_t g_login_refused;
+static char   g_login_refused_msg[160];
+static int login_blocked(char * msg, size_t msgn) {
+    if (!g_login_refused) return 0;
+    long left = 3600 - (long)(time(NULL) - g_login_refused);
+    if (left <= 0) { g_login_refused = 0; return 0; }
+    snprintf(msg, msgn, "%s (nieuwe poging over %ld min, of na opslaan)", g_login_refused_msg, (left + 59) / 60);
+    return 1;
+}
+static void login_refused(const char * why, char * msg, size_t msgn) {
+    g_login_refused = time(NULL);
+    snprintf(g_login_refused_msg, sizeof g_login_refused_msg, "%s", why);
+    snprintf(msg, msgn, "%s", why);
+    logf_("login refused: %s - next try in 60 min or after saving the settings", why);
+}
+static const char * env_or(const char * name, const char * dflt) {
+    const char * e = getenv(name);           /* test servers (tests only) */
+    return (e && *e) ? e : dflt;
+}
+static void jar_path(char * out, size_t n) { snprintf(out, n, "%s/inv-cookies-%s", tmp_dir(), APP_ID); }
+static void md5_hex(const char * s, char out[33]) {
+    uint8_t d[16];
+    inv_md5(s, strlen(s), d);
+    for (int i = 0; i < 16; i++) snprintf(out + 2 * i, 3, "%02x", d[i]);
+}
+/* "key":"value" anywhere in body (FusionSolar nests these differently per
+ * version; the plugin greps them the same way). */
+static int any_str(const char * body, const char * key, char * out, size_t n) {
+    char pat[64];
+    snprintf(pat, sizeof pat, "\"%s\"", key);
+    const char * p = body;
+    for (;;) {                                   /* "key" then ':' then '"', spaces allowed */
+        p = p ? strstr(p, pat) : NULL;
+        if (!p) return 0;
+        p += strlen(pat);
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+        if (*p != ':') continue;
+        p++;
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+        if (*p == '"') { p++; break; }
+    }
+    size_t o = 0;
+    while (*p && *p != '"' && o + 1 < n) out[o++] = *p++;
+    out[o] = 0;
+    return o > 0;
+}
+
+/* Growatt (GROW1): login newTwoLoginAPI.do with the password's MD5 hex in
+ * which every '0' at an even position is a 'c'; then newPlantAPI.do
+ * getUserCenterEnertyDataTwo: powerValue W, todayValue / totalValue kWh.
+ * server-api.growatt.com, or server.growatt.com when that answers 405. */
+static int  g_grow_in;                  /* logged in: session cookie in the jar */
+static char g_grow_base[96];
+static int grow_data(inv_reading_t * rd, char * msg, size_t msgn) {
+    char url[200];
+    snprintf(url, sizeof url, "%s/newPlantAPI.do?action=getUserCenterEnertyDataTwo&language=5", g_grow_base);
+    const char * h[] = { "User-Agent: ShinePhone/5.92 (iPad; iOS 14.6; Scale/2.00)", NULL };
+    resp_t r;
+    if (http_req(url, h, NULL, NULL, 0, 25, &r) != 0) { snprintf(msg, msgn, "curl ontbreekt"); return -1; }
+    int ok = 0;
+    double v;
+    if (r.code == 200 && r.body[0] == '{' && mj_num(r.body, "powerValue", &v)) {
+        rd->power_w = v;
+        if (mj_num(r.body, "todayValue", &v)) rd->today_wh = v * 1000.0;
+        if (mj_num(r.body, "totalValue", &v)) rd->total_wh = v * 1000.0;
+        ok = 1;
+    } else if (r.code == 0) { snprintf(msg, msgn, "Growatt niet bereikbaar (%s)", curl_why(r.curl)); ok = -1; }
+    else snprintf(msg, msgn, "Growatt: geen gegevens (HTTP %d)", r.code);   /* 0: session gone, log in again */
+    resp_free(&r);
+    return ok;
+}
+static int grow_login(char * msg, size_t msgn) {
+    char hx[33], pw[33], eu[400], body[520];
+    md5_hex(g_conf.grow_pass, hx);
+    for (int i = 0; i < 32; i++) pw[i] = (i % 2 == 0 && hx[i] == '0') ? 'c' : hx[i];
+    pw[32] = 0;
+    url_enc(g_conf.grow_user, eu, sizeof eu);
+    snprintf(body, sizeof body, "password=%s&userName=%s", pw, eu);
+    const char * h[] = { "Content-Type: application/x-www-form-urlencoded",
+                         "User-Agent: ShinePhone/5.92 (iPad; iOS 14.6; Scale/2.00)", NULL };
+    const char * bases[2] = { env_or("INV_GROWATT_API", "https://server-api.growatt.com"),
+                              env_or("INV_GROWATT_API2", "https://server.growatt.com") };
+    for (int i = 0; i < 2; i++) {
+        char url[200];
+        snprintf(url, sizeof url, "%s/newTwoLoginAPI.do", bases[i]);
+        resp_t r;
+        if (http_req(url, h, body, NULL, 0, 25, &r) != 0) { snprintf(msg, msgn, "curl ontbreekt"); return 0; }
+        if (r.code == 405 && i == 0) { resp_free(&r); continue; }
+        if (r.code == 0) { snprintf(msg, msgn, "Growatt niet bereikbaar (%s)", curl_why(r.curl)); resp_free(&r); return 0; }
+        if (r.code != 200) { snprintf(msg, msgn, "Growatt: HTTP %d bij inloggen", r.code); resp_free(&r); return 0; }
+        int refused = mj_find(r.body, "back.success", NULL) && !mj_bool(r.body, "back.success");
+        if (refused) {
+            char m[80] = "", why[160];
+            mj_str(r.body, "back.msg", m, sizeof m);
+            logf_("Growatt login: %.200s", r.body);
+            snprintf(why, sizeof why, "Growatt weigert de login%s%s%s", m[0] ? " (" : "", m, m[0] ? ")" : "");
+            login_refused(why, msg, msgn);
+            resp_free(&r);
+            return 0;
+        }
+        resp_free(&r);
+        snprintf(g_grow_base, sizeof g_grow_base, "%s", bases[i]);
+        logf_("Growatt: logged in via %s", bases[i]);
+        return 1;
+    }
+    snprintf(msg, msgn, "Growatt: login niet mogelijk (HTTP 405)");
+    return 0;
+}
+static int poll_growatt(inv_reading_t * rd, char * msg, size_t msgn) {
+    if (!g_conf.grow_user[0] || !g_conf.grow_pass[0]) { snprintf(msg, msgn, "vul gebruikersnaam en wachtwoord van Growatt in"); return 0; }
+    char jar[300];
+    jar_path(jar, sizeof jar);
+    g_jar = jar;
+    int ok = 0;
+    if (g_grow_in) ok = grow_data(rd, msg, msgn);
+    if (ok == 0 && !login_blocked(msg, msgn)) {
+        g_grow_in = 0;
+        unlink(jar);
+        if (grow_login(msg, msgn)) {
+            g_grow_in = 1;
+            ok = grow_data(rd, msg, msgn);
+        }
+    }
+    g_jar = NULL;
+    if (ok > 0) msg[0] = 0;
+    return ok > 0;
+}
+
+/* Hoymiles S-Miles Cloud (HOY1): iam/auth_login with the password's MD5
+ * hex -> token; pvm-data/data_count_station_real_data for the station id:
+ * real_power W, today_eq / total_eq Wh. The token is kept until refused. */
+static char g_hoy_tok[512];
+static int hoy_post(const char * path, const char * body, resp_t * r) {
+    char url[300], ht[560];
+    snprintf(url, sizeof url, "%s/platform/api/gateway/%s", env_or("INV_HOY_API", "https://global.hoymiles.com"), path);
+    snprintf(ht, sizeof ht, "token: %s", g_hoy_tok);
+    const char * h[] = { "Accept: application/json, text/plain, */*", "Content-Type: application/json;charset=UTF-8",
+                         "Origin: https://global.hoymiles.com", "Referer: https://global.hoymiles.com/platform/login",
+                         "User-Agent: Mozilla/5.0 (X11; Linux) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+                         g_hoy_tok[0] ? ht : NULL, NULL };
+    return http_req(url, h, body, NULL, 0, 25, r);
+}
+static int hoy_login(char * msg, size_t msgn) {
+    char hx[33], eu[300], body[500];
+    md5_hex(g_conf.hoy_pass, hx);
+    json_esc(g_conf.hoy_user, eu, sizeof eu);
+    snprintf(body, sizeof body, "{\"ERROR_BACK\":true,\"LOAD\":{\"loading\":true},\"body\":{\"password\":\"%s\",\"user_name\":\"%s\"},\"WAITING_PROMISE\":true}", hx, eu);
+    g_hoy_tok[0] = 0;
+    resp_t r;
+    if (hoy_post("iam/auth_login", body, &r) != 0) { snprintf(msg, msgn, "curl ontbreekt"); return 0; }
+    int ok = 0;
+    if (r.code == 200 && mj_str(r.body, "data.token", g_hoy_tok, sizeof g_hoy_tok) && g_hoy_tok[0]) { ok = 1; logf_("Hoymiles: logged in"); }
+    else if (r.code == 200) {
+        char m[100] = "", why[160];
+        mj_str(r.body, "message", m, sizeof m);
+        logf_("Hoymiles login: %.200s", r.body);
+        snprintf(why, sizeof why, "Hoymiles weigert de login%s%s%s", m[0] ? " (" : "", m, m[0] ? ")" : "");
+        login_refused(why, msg, msgn);
+        g_hoy_tok[0] = 0;
+    } else if (r.code == 0) snprintf(msg, msgn, "Hoymiles niet bereikbaar (%s)", curl_why(r.curl));
+    else snprintf(msg, msgn, "Hoymiles: HTTP %d bij inloggen", r.code);
+    resp_free(&r);
+    return ok;
+}
+static int hoy_data(inv_reading_t * rd, char * msg, size_t msgn) {
+    char body[120];
+    snprintf(body, sizeof body, "{\"body\":{\"sid\":%s},\"WAITING_PROMISE\":true}", g_conf.hoy_sid);
+    resp_t r;
+    if (hoy_post("pvm-data/data_count_station_real_data", body, &r) != 0) { snprintf(msg, msgn, "curl ontbreekt"); return -1; }
+    int ok = 0;
+    double v;
+    if (r.code == 200 && mj_num(r.body, "data.real_power", &v)) {
+        rd->power_w = v;
+        if (mj_num(r.body, "data.today_eq", &v)) rd->today_wh = v;
+        if (mj_num(r.body, "data.total_eq", &v)) rd->total_wh = v;
+        ok = 1;
+    } else if (r.code == 0) { snprintf(msg, msgn, "Hoymiles niet bereikbaar (%s)", curl_why(r.curl)); ok = -1; }
+    else {
+        char m[100] = "";
+        mj_str(r.body, "message", m, sizeof m);
+        snprintf(msg, msgn, "Hoymiles: geen gegevens voor station %s%s%s", g_conf.hoy_sid, m[0] ? ": " : "", m);
+        /* only a refused token is worth a new login; a wrong station is not */
+        char st[16] = "";
+        mj_str(r.body, "status", st, sizeof st);
+        if (!(r.code == 401 || !strcmp(st, "100") || strstr(m, "token"))) ok = -1;
+    }
+    resp_free(&r);
+    return ok;
+}
+static int poll_hoymiles(inv_reading_t * rd, char * msg, size_t msgn) {
+    if (!g_conf.hoy_user[0] || !g_conf.hoy_pass[0]) { snprintf(msg, msgn, "vul gebruikersnaam en wachtwoord van Hoymiles in"); return 0; }
+    for (const char * c = g_conf.hoy_sid; ; c++) {
+        if (!*c) { if (c != g_conf.hoy_sid) break; snprintf(msg, msgn, "vul het station-ID van Hoymiles in (cijfers)"); return 0; }
+        if (!isdigit((unsigned char)*c)) { snprintf(msg, msgn, "station-ID van Hoymiles: alleen cijfers"); return 0; }
+    }
+    int ok = 0;
+    if (g_hoy_tok[0]) ok = hoy_data(rd, msg, msgn);
+    if (ok == 0 && !login_blocked(msg, msgn) && hoy_login(msg, msgn)) ok = hoy_data(rd, msg, msgn);
+    if (ok > 0) msg[0] = 0;
+    return ok > 0;
+}
+
+/* Huawei FusionSolar (HUAWEI-T1 + solarPanel.sh): the FusionSolar app's
+ * token login (intl.fusionsolar.huawei.com:32800) gives roaRand and an
+ * accessToken; station-list on uni004eu5 with Host region01eu5, or
+ * region04eu5 when that lists no station. First station: currentPower kW,
+ * dailyEnergy / cumulativeEnergy kWh. The session is kept until refused. */
+#define FS_CLIENT "66E02141-3C1D-4DA3-A458-222B3032E4C4"
+#define FS_CLIENT_INFO "client-info: _manufacturer=iPad;_model=iPad;_os_ver=17.3.1;_os=iOS;_app_ver=6.24.563;_package_name=com.huawei.smartpvms;appClientId=" FS_CLIENT
+static char g_fs_tok[512], g_fs_rand[128];
+static int  g_fs_region;                 /* 0 unknown, 1 = region01eu5, 4 = region04eu5 */
+static int fs_login(char * msg, size_t msgn) {
+    char eu[300], ep[200], body[700];
+    json_esc(g_conf.fs_user, eu, sizeof eu);
+    json_esc(g_conf.fs_pass, ep, sizeof ep);
+    snprintf(body, sizeof body, "{\"userName\":\"%s\",\"value\":\"%s\",\"grantType\":\"password\",\"verifyCode\":\"\",\"appClientId\":\"" FS_CLIENT "\"}", eu, ep);
+    char url[200];
+    snprintf(url, sizeof url, "%s/rest/neteco/appauthen/v1/smapp/app/token", env_or("INV_FS_LOGIN", "https://intl.fusionsolar.huawei.com:32800"));
+    g_fs_tok[0] = g_fs_rand[0] = 0;
+    resp_t r;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        /* the plugin asks with Host region01eu5 first, then plain intl */
+        const char * h[] = { "Content-Type: application/json", "Accept: */*", "Accept-Language: nl-NL;q=1",
+                             "x-timezone-offset: 60", FS_CLIENT_INFO,
+                             "User-Agent: iCleanPower/6.24.563 (iPad; iOS 17.3.1; Scale/2.00)",
+                             attempt == 0 ? "Host: region01eu5.fusionsolar.huawei.com:32800" : "Cookie: locale=nl-nl",
+                             NULL };
+        if (http_req(url, h, body, NULL, 0, 25, &r) != 0) { snprintf(msg, msgn, "curl ontbreekt"); return 0; }
+        if (r.code == 0) { snprintf(msg, msgn, "FusionSolar niet bereikbaar (%s)", curl_why(r.curl)); resp_free(&r); return 0; }
+        any_str(r.body, "roaRand", g_fs_rand, sizeof g_fs_rand);
+        any_str(r.body, "accessToken", g_fs_tok, sizeof g_fs_tok);
+        if (g_fs_tok[0]) { resp_free(&r); logf_("FusionSolar: logged in"); return 1; }
+        /* an explicit refusal (wrong password) is not tried twice: FusionSolar
+         * locks the account after a few failures */
+        if (attempt == 1 || r.code != 200 || strstr(r.body, "\"failCode\"") || strstr(r.body, "\"errorMsg\"")) break;
+        resp_free(&r);
+    }
+    char m[100] = "", why[160];
+    if (!any_str(r.body, "errorMsg", m, sizeof m) && !any_str(r.body, "message", m, sizeof m)) any_str(r.body, "failCode", m, sizeof m);
+    logf_("FusionSolar login: HTTP %d %.200s", r.code, r.body ? r.body : "");
+    if (r.code == 200 || r.code == 401 || r.code == 403) {
+        snprintf(why, sizeof why, "FusionSolar weigert de login%s%s%s", m[0] ? " (" : "", m, m[0] ? ")" : "");
+        login_refused(why, msg, msgn);
+    } else snprintf(msg, msgn, "FusionSolar: HTTP %d bij inloggen", r.code);
+    resp_free(&r);
+    return 0;
+}
+/* 1 = reading, 0 = no station in this region / session gone, -1 = no connection */
+static int fs_data(int region, inv_reading_t * rd, char * msg, size_t msgn) {
+    char url[200], host[80], ref[80], rnd[180], ck[1200];
+    snprintf(url, sizeof url, "%s/rest/pvms/web/station/v1/station/station-list", env_or("INV_FS_DATA", "https://uni004eu5.fusionsolar.huawei.com:32800"));
+    snprintf(host, sizeof host, "Host: region%02deu5.fusionsolar.huawei.com:32800", region);
+    snprintf(ref, sizeof ref, "Referer: https://region%02deu5.fusionsolar.huawei.com", region);
+    snprintf(rnd, sizeof rnd, "roaRand: %s", g_fs_rand);
+    snprintf(ck, sizeof ck, "Cookie: locale=nl-nl;bspsession=%s;dp-session=%s", g_fs_tok, g_fs_tok);
+    const char * h[] = { "Content-Type: application/json", "Accept: */*", "Accept-Language: nl-NL;q=1", "x-timezone-offset: 120",
+                         FS_CLIENT_INFO, "User-Agent: iCleanPower/6.23.205 (iPad; iOS 16.1.1; Scale/2.00)",
+                         host, ref, rnd, ck, NULL };
+    resp_t r;
+    if (http_req(url, h, "{\"locale\":\"nl_NL\",\"sortId\":\"createTime\",\"sortDir\":\"DESC\",\"curPage\":1,\"pageSize\":100}",
+                 NULL, 0, 25, &r) != 0) { snprintf(msg, msgn, "curl ontbreekt"); return -1; }
+    int ok = 0;
+    double v;
+    if (r.code == 200 && mj_num(r.body, "data.list[0].currentPower", &v)) {
+        rd->power_w = v * 1000.0;
+        if (mj_num(r.body, "data.list[0].dailyEnergy", &v)) rd->today_wh = v * 1000.0;
+        if (mj_num(r.body, "data.list[0].cumulativeEnergy", &v)) rd->total_wh = v * 1000.0;
+        ok = 1;
+    } else if (r.code == 0) { snprintf(msg, msgn, "FusionSolar niet bereikbaar (%s)", curl_why(r.curl)); ok = -1; }
+    else if (r.code == 200 && mj_find(r.body, "data.list", NULL)) snprintf(msg, msgn, "FusionSolar: geen installatie op dit account");
+    else snprintf(msg, msgn, "FusionSolar: geen gegevens (HTTP %d)", r.code);
+    resp_free(&r);
+    return ok;
+}
+static int poll_fusionsolar(inv_reading_t * rd, char * msg, size_t msgn) {
+    if (!g_conf.fs_user[0] || !g_conf.fs_pass[0]) { snprintf(msg, msgn, "vul gebruikersnaam en wachtwoord van FusionSolar in"); return 0; }
+    for (int attempt = 0; attempt < 2; attempt++) {
+        if (!g_fs_tok[0]) {
+            if (attempt == 1 && !g_fs_region) break;        /* fresh login found no station: don't log in twice */
+            if (login_blocked(msg, msgn) || !fs_login(msg, msgn)) return 0;
+        }
+        int regions[2] = { g_fs_region ? g_fs_region : 1, g_fs_region ? 0 : 4 };
+        for (int i = 0; i < 2 && regions[i]; i++) {
+            int ok = fs_data(regions[i], rd, msg, msgn);
+            if (ok < 0) return 0;
+            if (ok) {
+                if (g_fs_region != regions[i]) logf_("FusionSolar: station in region%02deu5", regions[i]);
+                g_fs_region = regions[i];
+                msg[0] = 0;
+                return 1;
+            }
+        }
+        if (!g_fs_region) return 0;                 /* never found a station */
+        g_fs_tok[0] = 0;                            /* session gone: log in again */
+    }
+    return 0;
+}
+
 /* ------------------------------------------------ SunSpec / Modbus TCP */
 /* Generic SunSpec reader: find the "SunS" marker (40000, 50000 or 0), walk
  * the model chain to the inverter model (101-103 integer + scale factor,
@@ -1887,6 +2204,10 @@ int main(int argc, char ** argv) {
             g_frz_since = 0;
             g_gw_station_id[0] = g_gw_sn[0] = g_gw_type[0] = 0;
             g_sma_sid[0] = 0; g_sma_https = -1;
+            g_login_refused = 0;
+            g_grow_in = 0;
+            g_hoy_tok[0] = 0;
+            g_fs_tok[0] = g_fs_rand[0] = 0; g_fs_region = 0;
             last_ok = -1;
             zero_polls = 0;
         }
@@ -1918,6 +2239,9 @@ int main(int argc, char ** argv) {
         else if (!strcmp(t, "domoticz"))    ok = poll_domoticz(&rd, msg, sizeof msg);
         else if (!strcmp(t, "pvoutput"))    { cloud = 2; ok = poll_pvoutput(&rd, msg, sizeof msg); }
         else if (!strcmp(t, "solax_cloud")) { cloud = 2; ok = poll_solax(&rd, msg, sizeof msg); }
+        else if (!strcmp(t, "growatt_cloud"))  { cloud = 2; ok = poll_growatt(&rd, msg, sizeof msg); }
+        else if (!strcmp(t, "hoymiles_cloud")) { cloud = 2; ok = poll_hoymiles(&rd, msg, sizeof msg); }
+        else if (!strcmp(t, "fusionsolar"))    { cloud = 2; ok = poll_fusionsolar(&rd, msg, sizeof msg); }
         else snprintf(msg, sizeof msg, "onbekend type '%s'", t);
 
         report(ok, &rd, ok ? "" : msg);
@@ -1937,6 +2261,7 @@ int main(int argc, char ** argv) {
         if (cloud == 2 && wait < 300) wait = 300;    /* SEMS+ refreshes every ~5 min */
         if (zero_polls > 10 && wait < 120) wait = 120;
         if (!t[0]) wait = 15;     /* pick up new settings quickly */
+        if (getenv("INV_TEST_WAIT")) wait = atoi(getenv("INV_TEST_WAIT"));   /* tests only */
         for (int i = 0; i < wait && !g_stop; i++) {
             sleep(1);
             if (i % 5 == 4) {

@@ -1,7 +1,7 @@
 {
   "id": "inverters",
   "name": "Omvormers",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "binary": "freetoon-app-inverters",
   "args": [],
   "service_id": "inverters",
@@ -36,6 +36,9 @@
           { "value": "fp4all", "label": "FP4ALL datalogger (lokaal)" },
           { "value": "opendtu", "label": "openDTU (Hoymiles, lokaal)" },
           { "value": "domoticz", "label": "Domoticz (zonne-apparaat)" },
+          { "value": "growatt_cloud", "label": "Growatt (portal, gebruikersnaam en wachtwoord)" },
+          { "value": "fusionsolar", "label": "Huawei FusionSolar (portal, gebruikersnaam en wachtwoord)" },
+          { "value": "hoymiles_cloud", "label": "Hoymiles (portal, gebruikersnaam en wachtwoord)" },
           { "value": "pvoutput", "label": "PVOutput (cloud, API-sleutel)" },
           { "value": "solax_cloud", "label": "SolaxCloud (cloud, token-ID)" },
           { "value": "sunspec", "label": "SunSpec via Modbus TCP (SolarEdge, SMA, Fronius, Kostal, ...)" },
@@ -86,12 +89,23 @@
       { "key": "SOLAX_TOKEN", "label": "Token-ID", "type": "secret", "show": "TYPE=solax_cloud", "guards": "SOLAX_SN",
         "help": "Op solaxcloud.com: Service > API. Het registratienummer staat op de wifi-dongle (niet het serienummer van de omvormer). Ververst elke 5 minuten." },
       { "key": "SOLAX_SN", "label": "Registratienummer (wifi-dongle)", "type": "text", "show": "TYPE=solax_cloud" },
+      { "key": "GROW_USER", "label": "Growatt gebruikersnaam", "type": "text", "show": "TYPE=growatt_cloud", "guards": "GROW_PASS",
+        "help": "Het account van de ShinePhone-app / server.growatt.com. De app ververst elke 5 minuten. Wordt het wachtwoord geweigerd, dan probeert de app het pas na een uur opnieuw (of na opslaan), zodat je account niet geblokkeerd raakt." },
+      { "key": "GROW_PASS", "label": "Growatt wachtwoord", "type": "secret", "show": "TYPE=growatt_cloud" },
+      { "key": "FS_USER", "label": "FusionSolar gebruikersnaam", "type": "text", "show": "TYPE=fusionsolar", "guards": "FS_PASS",
+        "help": "Het account van de FusionSolar-app (eigenaar, Europese server). Eerste installatie op het account; elke 5 minuten. Bij een geweigerd wachtwoord pas na een uur opnieuw (of na opslaan): FusionSolar blokkeert na een paar foute pogingen. Live en lokaal kan ook: kies 'Huawei SUN2000 (Modbus TCP)'." },
+      { "key": "FS_PASS", "label": "FusionSolar wachtwoord", "type": "secret", "show": "TYPE=fusionsolar" },
+      { "key": "HOY_USER", "label": "Hoymiles gebruikersnaam", "type": "text", "show": "TYPE=hoymiles_cloud", "guards": "HOY_PASS",
+        "help": "Het account van global.hoymiles.com (S-Miles Cloud). Elke 5 minuten; bij een geweigerd wachtwoord pas na een uur opnieuw (of na opslaan). Heb je een openDTU, kies dan liever 'openDTU' (lokaal, live)." },
+      { "key": "HOY_PASS", "label": "Hoymiles wachtwoord", "type": "secret", "show": "TYPE=hoymiles_cloud" },
+      { "key": "HOY_SID", "label": "Station-ID", "type": "text", "placeholder": "620570", "show": "TYPE=hoymiles_cloud",
+        "help": "Log in op global.hoymiles.com en open je installatie: het getal achter id= in de adresbalk." },
       { "key": "MB_PORT", "label": "Modbus-poort", "type": "text", "default": "502", "show": "TYPE=sunspec|huawei|sungrow|growatt|solis_modbus",
         "help": "Zet Modbus TCP aan op de omvormer of de dongle. Meestal: SolarEdge 1502 (aanzetten via SetApp of het display; betrouwbaar via een netwerkkabel, via wifi alleen op sommige firmware), SMA 502, Fronius 502 (Modbus TCP op 'int + SF' of 'float'), Kostal 1502, Huawei 502 via de SDongle (Modbus TCP op 'onbeperkt' in FusionSolar) of 6607 via de eigen wifi van de omvormer, Sungrow 502 (WiNet-S: Modbus aan en geen whitelist), Growatt en Solis: de poort van je RS485-TCP-gateway (bijv. Elfin EW11, ingesteld op Modbus TCP naar RTU)." },
       { "key": "MB_UNIT", "label": "Modbus unit-id", "type": "text", "default": "1", "show": "TYPE=sunspec|huawei|sungrow|growatt|solis_modbus",
         "help": "Meestal 1 (SolarEdge, Fronius, Huawei via SDongle, Sungrow, Growatt, Solis); SMA 126, Kostal 71, Huawei via de eigen wifi van de omvormer 0." }
     ]
   },
-  "description": "Leest je omvormer uit (Enphase, Solis, Omnik, Fronius, SMA, Kostal Piko, ZeverSolar, SAJ, FP4ALL, openDTU, Domoticz, SolarEdge-cloud, GoodWe SEMS+, PVOutput, SolaxCloud, of SunSpec via Modbus TCP) voor de Zon-tegel, het dimscherm en de statistieken.",
+  "description": "Leest je omvormer uit (Enphase, Solis, Omnik, Fronius, SMA, Kostal Piko, ZeverSolar, SAJ, FP4ALL, openDTU, Domoticz, SolarEdge-cloud, GoodWe SEMS+, Growatt, Huawei FusionSolar, Hoymiles, PVOutput, SolaxCloud, of SunSpec via Modbus TCP) voor de Zon-tegel, het dimscherm en de statistieken.",
   "license": "MIT"
 }
