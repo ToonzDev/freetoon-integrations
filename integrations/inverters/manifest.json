@@ -1,7 +1,7 @@
 {
   "id": "inverters",
   "name": "Omvormers",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "binary": "freetoon-app-inverters",
   "args": [],
   "service_id": "inverters",
@@ -66,7 +66,8 @@
         "show": "TYPE=soliscloud" },
       { "key": "SE_CLIENT_ID", "label": "Client-ID", "type": "text", "show": "TYPE=solaredge_cloud", "guards": "SE_CLIENT_SECRET",
         "help": "Maak op developer.solaredge.com (SolarEdge ONE for Developers) een app met 'Site Access'; je krijgt een client-ID en secret. Zet bij die app Redirect URL (en Returned URL) op http://localhost; Origin URL leeg laten. Liever lokaal en live? Kies dan 'SunSpec via Modbus TCP' (poort 1502)." },
-      { "key": "SE_CLIENT_SECRET", "label": "Client secret", "type": "secret", "show": "TYPE=solaredge_cloud" },
+      { "key": "SE_CLIENT_SECRET", "label": "Client secret", "type": "secret", "show": "TYPE=solaredge_cloud",
+        "help": "Een nieuwe SolarEdge-app gemaakt? Vul dan ook het nieuwe secret in: een leeg veld houdt het oude, en dan meldt SolarEdge 'invalid_client'. Na opslaan probeert de app het geplakte adres meteen opnieuw." },
       { "key": "SE_REDIRECT", "label": "Redirect URI", "type": "text", "default": "http://localhost", "show": "TYPE=solaredge_cloud",
         "help": "Precies hetzelfde als de Redirect URL bij je SolarEdge-app. SolarEdge accepteert geen adres in je eigen netwerk, wel http://localhost. Heb je een eigen https-domein dat naar de Toon wijst, dan kan ook {REDIRECT} (je komt dan vanzelf terug)." },
       { "key": "SE_LINK", "label": "Koppelen met SolarEdge", "type": "link", "show": "TYPE=solaredge_cloud",

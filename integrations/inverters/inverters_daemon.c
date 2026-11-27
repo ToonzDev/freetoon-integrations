@@ -885,10 +885,13 @@ typedef struct {
     time_t pause_until;
     time_t power_t, total_t;     /* last successful reads */
     double power_w, total_wh;
+    int    style;                /* token request style that worked: 0 JSON body, 1 Basic + form, 2 form body */
 } se_state_t;
 
 static se_state_t g_se;
 static int g_se_loaded;
+static char g_se_client_bad[512];   /* code refused with invalid_client (reset on new settings) */
+static char g_se_client_msg[200];
 
 /* INV_SE_API: a test server instead of SolarEdge (tests/e2e only). */
 static const char * se_api(void) {
@@ -905,9 +908,9 @@ static void se_save(void) {
     FILE * f = fdopen(fd, "w");
     if (!f) { close(fd); return; }
     fprintf(f, "client=%s\nrefresh=%s\naccess=%s\nexp=%ld\nsite=%s\ncode_done=%s\npause_until=%ld\n"
-               "power_t=%ld\npower_w=%.0f\ntotal_t=%ld\ntotal_wh=%.0f\n",
+               "power_t=%ld\npower_w=%.0f\ntotal_t=%ld\ntotal_wh=%.0f\nstyle=%d\n",
             g_se.client, g_se.refresh, g_se.access, (long)g_se.exp, g_se.site, g_se.code_done,
-            (long)g_se.pause_until, (long)g_se.power_t, g_se.power_w, (long)g_se.total_t, g_se.total_wh);
+            (long)g_se.pause_until, (long)g_se.power_t, g_se.power_w, (long)g_se.total_t, g_se.total_wh, g_se.style);
     fclose(f);
     rename(tmp, path);
 }
@@ -936,6 +939,7 @@ static void se_load(void) {
         if (!strcmp(k, "total_t")) g_se.total_t = (time_t)atol(v);
         if (!strcmp(k, "power_w")) g_se.power_w = atof(v);
         if (!strcmp(k, "total_wh")) g_se.total_wh = atof(v);
+        if (!strcmp(k, "style")) g_se.style = atoi(v);
     }
     fclose(f);
 }
@@ -961,27 +965,58 @@ static int query_param(const char * s, const char * key, char * out, size_t n) {
     return 0;
 }
 
+/* Copy without leading/trailing spaces (pasted ids and secrets). */
+static void trim_copy(const char * s, char * out, size_t n) {
+    while (*s && isspace((unsigned char)*s)) s++;
+    size_t l = strlen(s);
+    while (l && isspace((unsigned char)s[l - 1])) l--;
+    if (l >= n) l = n - 1;
+    memcpy(out, s, l);
+    out[l] = 0;
+}
+
 /* POST to the token endpoint. 1 = new tokens stored, 0 = failed (msg set,
- * *http = status). */
-static int se_token(const char * grant, const char * value, int with_redirect, char * msg, size_t msgn, int * http) {
+ * *http = status, *bad_client = the server rejected client id / secret).
+ * style: how the client authenticates - 0 JSON body with client_id/secret
+ * (the open-source clients), 1 HTTP Basic + form body (OAuth's
+ * client_secret_basic), 2 form body with client_id/secret. */
+static int se_token(const char * grant, const char * value, int with_redirect, int style,
+                    char * msg, size_t msgn, int * http, int * bad_client) {
     static char body[4600];
-    char ci[260], cs[260], rd[520];
+    char id[130], sec[130], ci[400], cs[400], rd[520], up[270];
     static char ev[2200];
-    json_esc(g_conf.se_client_id, ci, sizeof ci);
-    json_esc(g_conf.se_client_secret, cs, sizeof cs);
-    json_esc(value, ev, sizeof ev);
-    json_esc(g_conf.se_redirect, rd, sizeof rd);
+    trim_copy(g_conf.se_client_id, id, sizeof id);
+    trim_copy(g_conf.se_client_secret, sec, sizeof sec);
     int is_code = !strcmp(grant, "authorization_code");
-    snprintf(body, sizeof body,
-             "{\"grant_type\":\"%s\",\"%s\":\"%s\",\"client_id\":\"%s\",\"client_secret\":\"%s\"%s%s%s}",
-             grant, is_code ? "code" : "refresh_token", ev, ci, cs,
-             with_redirect ? ",\"redirect_uri\":\"" : "", with_redirect ? rd : "", with_redirect ? "\"" : "");
-    const char * h[] = { "Content-Type: application/json", "Accept: application/json", NULL };
+    const char * vkey = is_code ? "code" : "refresh_token";
+    const char * ctype = "Content-Type: application/json";
+    if (style == 0) {
+        json_esc(id, ci, sizeof ci);
+        json_esc(sec, cs, sizeof cs);
+        json_esc(value, ev, sizeof ev);
+        json_esc(g_conf.se_redirect, rd, sizeof rd);
+        snprintf(body, sizeof body,
+                 "{\"grant_type\":\"%s\",\"%s\":\"%s\",\"client_id\":\"%s\",\"client_secret\":\"%s\"%s%s%s}",
+                 grant, vkey, ev, ci, cs,
+                 with_redirect ? ",\"redirect_uri\":\"" : "", with_redirect ? rd : "", with_redirect ? "\"" : "");
+    } else {
+        ctype = "Content-Type: application/x-www-form-urlencoded";
+        url_enc(value, ev, sizeof ev);
+        url_enc(g_conf.se_redirect, rd, sizeof rd);
+        url_enc(id, ci, sizeof ci);
+        url_enc(sec, cs, sizeof cs);
+        int o = snprintf(body, sizeof body, "grant_type=%s&%s=%s", grant, vkey, ev);
+        if (with_redirect && o > 0 && (size_t)o < sizeof body) o += snprintf(body + o, sizeof body - o, "&redirect_uri=%s", rd);
+        if (style == 2 && o > 0 && (size_t)o < sizeof body) snprintf(body + o, sizeof body - o, "&client_id=%s&client_secret=%s", ci, cs);
+        snprintf(up, sizeof up, "%s:%s", id, sec);
+    }
+    const char * h[] = { ctype, "Accept: application/json", NULL };
     resp_t r;
     *http = 0;
+    *bad_client = 0;
     char turl[300];
     snprintf(turl, sizeof turl, "%s/oauth2/token", se_api());
-    if (http_req(turl, h, body, NULL, 0, 25, &r) != 0) { snprintf(msg, msgn, "curl ontbreekt"); return 0; }
+    if (http_req(turl, h, body, style == 1 ? up : NULL, 0, 25, &r) != 0) { snprintf(msg, msgn, "curl ontbreekt"); return 0; }
     *http = r.code;
     int ok = 0;
     if (r.code == 200) {
@@ -991,6 +1026,8 @@ static int se_token(const char * grant, const char * value, int with_redirect, c
         mj_str(r.body, "refresh_token", ref, sizeof ref);
         mj_num(r.body, "expires_in", &exp_in);
         if (acc[0]) {
+            if (g_se.style != style) logf_("SolarEdge: token request style %d works", style);
+            g_se.style = style;
             snprintf(g_se.access, sizeof g_se.access, "%s", acc);
             if (ref[0]) snprintf(g_se.refresh, sizeof g_se.refresh, "%s", ref);
             if (exp_in < 60) exp_in = 60;
@@ -1006,8 +1043,12 @@ static int se_token(const char * grant, const char * value, int with_redirect, c
         mj_str(r.body, "error", e, sizeof e);
         mj_str(r.body, "error_description", d, sizeof d);
         if (!d[0]) mj_str(r.body, "message", d, sizeof d);
-        snprintf(msg, msgn, "SolarEdge weigert (HTTP %d%s%s%s%s)", r.code, e[0] ? ", " : "", e, d[0] ? ": " : "", d);
-        logf_("SolarEdge token (%s): HTTP %d %.200s", grant, r.code, r.body ? r.body : "");
+        *bad_client = !strcmp(e, "invalid_client") || r.code == 401;
+        if (*bad_client)
+            snprintf(msg, msgn, "SolarEdge herkent client-ID of secret niet (invalid_client): vul het secret van je huidige SolarEdge-app opnieuw in en sla op");
+        else
+            snprintf(msg, msgn, "SolarEdge weigert (HTTP %d%s%s%s%s)", r.code, e[0] ? ", " : "", e, d[0] ? ": " : "", d);
+        logf_("SolarEdge token (%s, style %d): HTTP %d %.200s", grant, style, r.code, r.body ? r.body : "");
     }
     resp_free(&r);
     return ok;
@@ -1038,13 +1079,36 @@ static void se_take_code(char * msg, size_t msgn) {
         return;
     }
     if (!strcmp(code, g_se.code_done)) return;        /* already used (codes are single use) */
+    if (g_se_client_bad[0] && !strcmp(code, g_se_client_bad)) {   /* id/secret refused: wait for new settings */
+        snprintf(msg, msgn, "%s", g_se_client_msg);
+        return;
+    }
     query_param(src, "site_id", site, sizeof site);
+    int http = 0, bad = 0, any_bad = 0, ok = 0;
+    char bad_msg[200] = "";
+    /* JSON body without / with redirect_uri (as before), then the two
+     * standard OAuth ways when the client is refused (invalid_client) */
+    static const int try_style[4] = { 0, 0, 1, 2 }, try_redir[4] = { 0, 1, 1, 1 };
+    for (int i = 0; i < 4 && !ok; i++) {
+        if (try_redir[i] && !g_conf.se_redirect[0]) continue;
+        if (i >= 2 && !any_bad) break;                           /* only for a refused client */
+        ok = se_token("authorization_code", code, try_redir[i], try_style[i], msg, msgn, &http, &bad);
+        if (bad && !any_bad) { any_bad = 1; snprintf(bad_msg, sizeof bad_msg, "%s", msg); }
+        if (!ok && !(http >= 400 && http < 500)) break;          /* not a request problem */
+    }
+    if (ok) msg[0] = 0;                                          /* an earlier attempt's error */
+    else if (any_bad) snprintf(msg, msgn, "%s", bad_msg);        /* the real cause, not a later style's */
+    bad = any_bad;
+    if (!ok && bad) {
+        /* the client was refused, so SolarEdge did not use the code: retry it
+         * once the settings are saved (a corrected secret), while it is valid */
+        snprintf(g_se_client_bad, sizeof g_se_client_bad, "%s", code);
+        snprintf(g_se_client_msg, sizeof g_se_client_msg, "%s", msg);
+        logf_("SolarEdge: linking failed: %s", msg);
+        return;
+    }
     snprintf(g_se.code_done, sizeof g_se.code_done, "%s", code);
     se_save();
-    int http;
-    int ok = se_token("authorization_code", code, 0, msg, msgn, &http);
-    if (!ok && http >= 400 && http < 500 && g_conf.se_redirect[0])
-        ok = se_token("authorization_code", code, 1, msg, msgn, &http);   /* some servers want redirect_uri */
     if (!ok) { logf_("SolarEdge: linking failed: %s", msg); return; }
     if (site[0]) snprintf(g_se.site, sizeof g_se.site, "%s", site);
     g_se.power_t = g_se.total_t = 0;                  /* read right away */
@@ -1061,8 +1125,8 @@ static int se_access(char * msg, size_t msgn) {
     }
     if (g_se.access[0] && time(NULL) < g_se.exp - 300) return 1;
     if (!g_se.refresh[0]) { snprintf(msg, msgn, "koppeling verlopen: klik opnieuw op 'Koppelen met SolarEdge'"); return 0; }
-    int http;
-    if (se_token("refresh_token", g_se.refresh, 0, msg, msgn, &http)) return 1;
+    int http, bad;
+    if (se_token("refresh_token", g_se.refresh, 0, g_se.style, msg, msgn, &http, &bad)) return 1;
     if (http == 400 || http == 401) {                 /* the grant is gone: link again */
         g_se.refresh[0] = g_se.access[0] = 0;
         se_save();
@@ -2204,6 +2268,7 @@ int main(int argc, char ** argv) {
             g_frz_since = 0;
             g_gw_station_id[0] = g_gw_sn[0] = g_gw_type[0] = 0;
             g_sma_sid[0] = 0; g_sma_https = -1;
+            g_se_client_bad[0] = 0;           /* new id / secret: a refused code may be tried again */
             g_login_refused = 0;
             g_grow_in = 0;
             g_hoy_tok[0] = 0;
